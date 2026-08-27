@@ -1,0 +1,27 @@
+component: scf
+name: ai-todo-api
+inputs:
+  name: ai-todo-api
+  src:
+    src: ./scf
+    exclude:
+      - '.env*'
+  installDependency: true
+  handler: dist-server/scf.main
+  runtime: Nodejs20.19
+  region: ap-shanghai
+  memorySize: 256
+  timeout: 30
+  environment:
+    variables:
+      SCF_RUNTIME: "1"
+      STORAGE_ADAPTER: cloudbase
+  events:
+    - apigw:
+        parameters:
+          protocols: [https]
+          environment: release
+          endpoints:
+            - path: /api/{proxy+}
+              method: ANY
+              enableCORS: true
