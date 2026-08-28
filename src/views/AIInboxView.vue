@@ -51,7 +51,7 @@ const speech = useSpeech(text => { content.value += `${content.value && !content
     <div class="preview-heading"><h2>识别到 {{ preview.length }} 个任务</h2><p>确认后才会写入任务库</p></div>
     <article v-for="(task, index) in preview" :key="index" class="preview-item" :class="{ excluded: !task.selected }">
       <button class="check checked" :class="{ off: !task.selected }" @click="task.selected = !task.selected">✓</button>
-      <div><input v-model="task.title" class="preview-title" /><div class="preview-fields"><input :value="task.dueDate ?? ''" type="date" @change="setPreviewDate(task, $event)"/><input v-model="task.startTime" type="time" :disabled="!task.dueDate"/><template v-if="task.dateRange"><input v-model="task.dateRange.start" type="date" aria-label="范围开始"/><span>–</span><input v-model="task.dateRange.end" type="date" aria-label="范围结束"/></template></div></div>
+      <div><input v-model="task.title" class="preview-title" /><div class="preview-fields"><label class="preview-date-field"><span>日期</span><input :value="task.dueDate ?? ''" type="date" @change="setPreviewDate(task, $event)"/></label><input v-if="task.dueDate" v-model="task.startTime" type="time" aria-label="开始时间"/><template v-if="task.dateRange"><input v-model="task.dateRange.start" type="date" aria-label="范围开始"/><span>–</span><input v-model="task.dateRange.end" type="date" aria-label="范围结束"/></template></div></div>
     </article>
     <div class="sticky-actions"><button @click="preview = []">返回修改</button><button class="primary" :disabled="!canConfirm" @click="confirm">全部添加</button></div>
   </section>

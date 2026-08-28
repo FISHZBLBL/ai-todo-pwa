@@ -57,8 +57,8 @@ app.post('/api/sync', requireAuth, async (req, res) => {
     res.json(response)
   } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : '提醒调度失败' }) }
 })
-app.post('/api/push/subscribe', requireAuth, async (req, res) => { const input = z.object({ endpoint: z.string().url(), keys: z.object({ auth: z.string(), p256dh: z.string() }), appUrl: z.string().url() }).safeParse(req.body); if (!input.success) return res.status(400).json({ error: 'Push Subscription 无效' }); await cloudStore.addSubscription(input.data); res.status(204).end() })
+app.post('/api/push/subscribe', requireAuth, async (req, res) => { const input = z.object({ endpoint: z.string().url(), keys: z.object({ auth: z.string(), p256dh: z.string() }), appUrl: z.string().url() }).safeParse(req.body); if (!input.success) return res.status(400).json({ error: 'Push Subscription 无效' }); await cloudStore.addSubscription(input.data); res.status(200).json({ ok: true }) })
 app.get('/api/push/subscription', requireAuth, async (req, res) => { const endpoint = z.string().url().safeParse(req.query.endpoint); if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' }); res.json({ registered: await cloudStore.hasSubscription(endpoint.data) }) })
-app.delete('/api/push/subscribe', requireAuth, async (req, res) => { const endpoint = z.string().url().safeParse(req.body?.endpoint); if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' }); await cloudStore.removeSubscription(endpoint.data); res.status(204).end() })
+app.delete('/api/push/subscribe', requireAuth, async (req, res) => { const endpoint = z.string().url().safeParse(req.body?.endpoint); if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' }); await cloudStore.removeSubscription(endpoint.data); res.status(200).json({ ok: true }) })
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))
 if (!process.env.SCF_RUNTIME && !process.env.NETLIFY && process.env.NETLIFY_DEV !== 'true') app.listen(config.PORT, () => console.log(`AI Todo API listening on :${config.PORT}`))

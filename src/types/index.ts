@@ -16,6 +16,8 @@ export interface Task {
   reminderEventId?: string | null
   reminderSentAt?: string | null
   pinned: boolean
+  /** Manual position within the current date group; omitted for legacy tasks. */
+  sortOrder?: number | null
   completed: boolean
   completedAt?: string | null
   createdAt: string

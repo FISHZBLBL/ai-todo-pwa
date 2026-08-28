@@ -18,6 +18,8 @@ import SearchView from './views/SearchView.vue'
 import { api, authExpiredEvent } from './services/api'
 import { downloadText, tasksToIcs } from './utils/export'
 import { getSettings, saveSettings } from './storage/database'
+import { requestCloseSwipeActions } from './utils/swipeCoordinator'
+import { CalendarDays, Check, Plus, Search, Settings } from '@lucide/vue'
 
 const store = useTaskStore(); const screen = ref<'home'|'ai'|'completed'|'settings'|'search'>('home'); const sheet = ref<'add'|'quick'|'edit'|'date'|null>(null); const editing = ref<Task>(); const dateEditing = ref<Task>(); const authenticated = ref(api.hasSession()); const draftCount = ref(0); const draftToOpen = ref<string>(); const selectMode = ref(false); const selected = ref(new Set<string>())
 let uninstallSync: (() => void) | undefined
@@ -38,7 +40,7 @@ const groups = computed(() => {
     else if (task.dueDate || task.dateRange) add(formatTaskDate(task), task)
     else add('无日期', task)
   }
-  return [...map.entries()].map(([label,tasks]) => ({ label, tasks }))
+  return [...map.entries()].map(([label,tasks]) => ({ label, key: label, tasks }))
 })
 function openEdit(task: Task) { editing.value = task; sheet.value = 'edit' }
 function openTodoFromUrl() { const todoId = new URLSearchParams(location.search).get('todo'); if (!todoId) return; const task = store.tasks.find(item => item.id === todoId && !item.deletedAt); if (task) { screen.value = 'home'; openEdit(task) } history.replaceState(null, '', `${location.pathname}${location.hash}`) }
@@ -53,8 +55,20 @@ function exportSelected() { try { downloadText('todo-selected.ics', tasksToIcs(s
 function editFromSearch(task: Task) { editing.value = task; screen.value = 'home'; sheet.value = 'edit' }
 function editFromCompleted(task: Task) { editing.value = task; screen.value = 'home'; sheet.value = 'edit' }
 function openDraft(id: string) { draftToOpen.value = id; screen.value = 'ai' }
-async function saveQuickDate(dueDate: string | null) { if (!dateEditing.value) return; await store.update(dateEditing.value.id, dueDate ? { dueDate, dateRange: null } : { dueDate: null, dateRange: null, startTime: null, endTime: null }); dateEditing.value = undefined; sheet.value = null }
+async function saveQuickDate(patch: Partial<Task>) { if (!dateEditing.value) return; await store.update(dateEditing.value.id, patch); dateEditing.value = undefined; sheet.value = null }
 function exportOne(task: Task) { try { downloadText(`todo-${task.id}.ics`, tasksToIcs([task]), 'text/calendar') } catch (error) { alert((error as Error).message) } }
+function closeSwipeActionsFromBlank(event: MouseEvent) { if (event.target instanceof Element && event.target.closest('.task-swipe')) return; requestCloseSwipeActions() }
+const draggingTaskId = ref<string>(); const draggingGroupKey = ref<string>(); const orderChanged = ref(false)
+function startReorder(id: string) { const group = groups.value.find(item => item.tasks.some(task => task.id === id)); if (!group) return; draggingTaskId.value = id; draggingGroupKey.value = group.key; orderChanged.value = false }
+function moveReorder(id: string, x: number, y: number) {
+  if (draggingTaskId.value !== id || !draggingGroupKey.value) return
+  const target = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-task-id]')
+  if (!target?.dataset.taskId || target.dataset.taskId === id || target.closest<HTMLElement>('[data-task-group]')?.dataset.taskGroup !== draggingGroupKey.value) return
+  const group = groups.value.find(item => item.key === draggingGroupKey.value); if (!group) return
+  const ids = group.tasks.map(task => task.id); const from = ids.indexOf(id), to = ids.indexOf(target.dataset.taskId); if (from < 0 || to < 0) return
+  ids.splice(from, 1); ids.splice(to, 0, id); store.positionTasks(ids); orderChanged.value = true
+}
+async function finishReorder(id: string) { if (draggingTaskId.value !== id) return; const group = groups.value.find(item => item.key === draggingGroupKey.value); if (group && orderChanged.value) await store.persistPositions(group.tasks.map(task => task.id)); draggingTaskId.value = undefined; draggingGroupKey.value = undefined }
 </script>
 <template>
   <LoginView v-if="!authenticated" @success="loggedIn" />
@@ -62,10 +76,10 @@ function exportOne(task: Task) { try { downloadText(`todo-${task.id}.ics`, tasks
   <CompletedView v-else-if="screen === 'completed'" @close="screen='home'" @edit="editFromCompleted" />
   <SettingsView v-else-if="screen === 'settings'" @close="screen='home'" @logout="logout" />
   <SearchView v-else-if="screen === 'search'" @close="screen='home'" @edit="editFromSearch" @open-draft="openDraft" />
-  <div v-else class="app-shell">
-    <header class="topbar"><div><h1>{{ selectMode ? '选择日历任务' : 'Todo' }}</h1><p>{{ selectMode ? '仅明确日期和时间的任务可导出' : `${store.active.length} 件在路上` }}</p></div><div class="top-actions"><button class="text-action" @click="selectMode=!selectMode;selected=new Set()">{{ selectMode ? '取消' : '日历' }}</button><button class="search-button" aria-label="搜索" @click="screen='search'">⌕</button></div></header>
-    <main class="task-list"><section v-for="group in groups" :key="group.label" class="task-group"><h2>{{ group.label }}</h2><TaskRow v-for="task in group.tasks" :key="task.id" :task="task" :selection-mode="selectMode" :selectable="Boolean(task.dueDate && task.startTime)" :selected="selected.has(task.id)" @select="toggleSelected" @edit="openEdit" @date="openDate" @complete="store.complete" @restore="store.restore" @remove="remove"/></section><div v-if="!groups.length" class="empty home-empty"><span>✓</span><h2>现在没有要做的事</h2><p>想到什么，随手丢进来。</p></div></main>
-    <nav class="bottom-nav"><button @click="screen='settings'"><span>⚙</span>设置</button><button class="add-button" aria-label="添加任务" @click="sheet='add'">＋</button><button @click="screen='completed'"><span>✓</span>已完成</button></nav>
+  <div v-else class="app-shell" @click="closeSwipeActionsFromBlank">
+    <header class="topbar"><div><h1>{{ selectMode ? '选择日历任务' : 'Todo' }}</h1><p>{{ selectMode ? '仅明确日期和时间的任务可导出' : `${store.active.length} 件在路上` }}</p></div><div class="top-actions"><button class="text-action icon-action" :aria-label="selectMode ? '取消日历选择' : '选择日历任务'" :title="selectMode ? '取消' : '日历'" @click="selectMode=!selectMode;selected=new Set()"><CalendarDays :size="24" :stroke-width="1.8"/></button><button class="search-button" aria-label="搜索" @click="screen='search'"><Search :size="23" :stroke-width="2.1"/></button></div></header>
+    <main class="task-list"><section v-for="group in groups" :key="group.label" class="task-group" :data-task-group="group.key"><h2>{{ group.label }}</h2><TaskRow v-for="task in group.tasks" :key="task.id" :task="task" :selection-mode="selectMode" :selectable="Boolean(task.dueDate && task.startTime)" :selected="selected.has(task.id)" :reorderable="!selectMode" @select="toggleSelected" @edit="openEdit" @date="openDate" @complete="store.complete" @restore="store.restore" @remove="remove" @reorder-start="startReorder" @reorder-move="moveReorder" @reorder-end="finishReorder"/></section><div v-if="!groups.length" class="empty home-empty"><span>✓</span><h2>现在没有要做的事</h2><p>想到什么，随手丢进来。</p></div></main>
+    <nav class="bottom-nav"><button aria-label="设置" @click="screen='settings'"><span><Settings :size="22" :stroke-width="1.8"/></span>设置</button><button class="add-button" aria-label="添加任务" @click="sheet='add'"><Plus :size="31" :stroke-width="2.2"/></button><button aria-label="已完成任务" @click="screen='completed'"><span><Check :size="23" :stroke-width="2"/></span>已完成</button></nav>
     <div v-if="store.lastDeleted" class="toast">已删除 <button @click="store.undoDelete">撤销</button></div>
     <div v-if="selectMode" class="selection-bar"><span>已选 {{ selected.size }} 项</span><button class="primary" :disabled="!selected.size" @click="exportSelected">导出到系统日历</button></div>
     <BottomSheet v-if="sheet==='add'" title="添加" @close="sheet=null"><div class="add-choices"><button @click="sheet='quick'"><span class="choice-icon">＋</span><div><strong>快速添加任务</strong><small>知道要记什么，立即保存</small></div><span>›</span></button><button @click="sheet=null;screen='ai'"><span class="choice-icon ai">✦</span><div><strong>AI 整理</strong><small>一次输入多件事，确认后添加</small></div><span v-if="draftCount" class="draft-badge">{{ draftCount }}</span><span>›</span></button></div></BottomSheet>

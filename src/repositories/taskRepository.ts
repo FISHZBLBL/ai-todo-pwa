@@ -14,7 +14,8 @@ export function normalizeTask(value: Task | (Partial<Task> & Record<string, unkn
     reminderEnabled: value.reminderEnabled ?? false,
     reminderAt: value.reminderAt ?? null,
     reminderEventId: value.reminderEventId ?? null,
-    reminderSentAt: value.reminderSentAt ?? null
+    reminderSentAt: value.reminderSentAt ?? null,
+    sortOrder: value.sortOrder ?? null
   } as Task
 }
 

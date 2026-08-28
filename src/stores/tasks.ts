@@ -1,10 +1,11 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { taskRepository } from '../repositories/taskRepository'
-import { isOverdue, toDateKey } from '../utils/date'
+import { formatTaskDate, isOverdue, toDateKey } from '../utils/date'
 import type { ParsedTask, Task } from '../types'
 import { extractFirstUrl } from '../utils/url'
 import { syncNow } from '../sync/syncService'
+import { automaticReminder } from '../utils/reminder'
 
 const nowIso = () => new Date().toISOString()
 export const useTaskStore = defineStore('tasks', () => {
@@ -20,7 +21,9 @@ export const useTaskStore = defineStore('tasks', () => {
   async function load() { tasks.value = await taskRepository.list(true); loading.value = false }
   function build(input: Partial<Task> & Pick<Task, 'title'>): Task {
     const now = nowIso()
-    return { id: crypto.randomUUID(), title: input.title.trim(), note: input.note ?? null, url: input.url ?? extractFirstUrl(input.title), dueDate: input.dueDate ?? null, dateRange: input.dateRange ?? null, startTime: input.startTime ?? null, endTime: input.endTime ?? null, reminderEnabled: input.reminderEnabled ?? false, reminderAt: input.reminderAt ?? null, reminderEventId: null, reminderSentAt: null, pinned: input.pinned ?? false, completed: false, completedAt: null, createdAt: now, updatedAt: now, deletedAt: null, recurrence: null, source: input.source ?? 'manual' }
+    const dueDate = input.dueDate ?? null, startTime = input.startTime ?? null
+    const automatic = automaticReminder(dueDate, startTime)
+    return { id: crypto.randomUUID(), title: input.title.trim(), note: input.note ?? null, url: input.url ?? extractFirstUrl(input.title), dueDate, dateRange: input.dateRange ?? null, startTime, endTime: input.endTime ?? null, reminderEnabled: input.reminderEnabled ?? automatic.reminderEnabled, reminderAt: input.reminderAt ?? automatic.reminderAt, reminderEventId: null, reminderSentAt: null, pinned: input.pinned ?? false, sortOrder: null, completed: false, completedAt: null, createdAt: now, updatedAt: now, deletedAt: null, recurrence: null, source: input.source ?? 'manual' }
   }
   function scheduleSync() { window.clearTimeout(syncTimer); syncTimer = window.setTimeout(() => void syncNow().catch(() => undefined), 100) }
   async function create(input: Partial<Task> & Pick<Task, 'title'>) { const task = build(input); tasks.value.push(task); await taskRepository.save(task); scheduleSync(); return task }
@@ -39,6 +42,18 @@ export const useTaskStore = defineStore('tasks', () => {
   }
   async function undoDelete() { if (!lastDeleted.value) return; await update(lastDeleted.value.id, { deletedAt: null }); lastDeleted.value = null; window.clearTimeout(undoTimer) }
 
+  function positionTasks(ids: string[]) {
+    const positions = new Map(ids.map((id, index) => [id, index]))
+    tasks.value = tasks.value.map(task => positions.has(task.id) ? { ...task, sortOrder: positions.get(task.id)! } : task)
+  }
+  async function persistPositions(ids: string[]) {
+    const positions = new Map(ids.map((id, index) => [id, index]))
+    const updatedAt = nowIso()
+    tasks.value = tasks.value.map(task => positions.has(task.id) ? { ...task, sortOrder: positions.get(task.id)!, updatedAt } : task)
+    await taskRepository.saveMany(tasks.value.filter(task => positions.has(task.id)))
+    scheduleSync()
+  }
+
   const sorted = computed(() => [...active.value].sort((a, b) => {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
     const today = toDateKey(new Date())
@@ -49,8 +64,19 @@ export const useTaskStore = defineStore('tasks', () => {
       if (task.dateRange) return `3-${task.dateRange.start}-${task.createdAt}`
       return `4-${task.createdAt}`
     }
+    const group = (task: Task) => {
+      if (task.pinned) return '0-置顶'
+      if (isOverdue(task)) return '1-过期'
+      if (task.dueDate === today) return '2-今天'
+      if (task.dueDate) return `3-${formatTaskDate(task)}`
+      if (task.dateRange) return `4-${formatTaskDate(task)}`
+      return '5-无日期'
+    }
+    const byGroup = group(a).localeCompare(group(b))
+    if (byGroup !== 0) return byGroup
+    if (a.sortOrder != null || b.sortOrder != null) return (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER)
     return key(a).localeCompare(key(b))
   }))
 
-  return { tasks, active, completed, sorted, loading, lastDeleted, load, create, createParsed, update, complete, restore, softDelete, undoDelete }
+  return { tasks, active, completed, sorted, loading, lastDeleted, load, create, createParsed, update, complete, restore, softDelete, undoDelete, positionTasks, persistPositions }
 })
