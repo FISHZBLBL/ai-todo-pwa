@@ -7,10 +7,14 @@ export interface Task {
   title: string
   note?: string | null
   url?: string | null
-  date?: string | null
+  dueDate?: string | null
   dateRange?: DateRange | null
-  time?: string | null
+  startTime?: string | null
   endTime?: string | null
+  reminderEnabled: boolean
+  reminderAt?: string | null
+  reminderEventId?: string | null
+  reminderSentAt?: string | null
   pinned: boolean
   completed: boolean
   completedAt?: string | null
@@ -52,9 +56,9 @@ export interface TodoExport {
 
 export interface ParsedTask {
   title: string
-  date: string | null
+  dueDate: string | null
   dateRange: DateRange | null
-  time: string | null
+  startTime: string | null
   endTime: string | null
   url: string | null
   selected?: boolean

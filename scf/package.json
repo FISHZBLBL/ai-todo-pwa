@@ -2,9 +2,10 @@
   "name": "ai-todo-scf-runtime",
   "private": true,
   "version": "1.0.0",
-  "type": "module",
+  "type": "commonjs",
   "dependencies": {
     "@cloudbase/js-sdk": "3.8.2",
+    "@cloudbase/node-sdk": "3.18.1",
     "@cloudbase/signature-nodejs": "2.0.0",
     "bcryptjs": "3.0.3",
     "cors": "2.8.6",

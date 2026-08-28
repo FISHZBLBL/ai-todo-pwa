@@ -9,7 +9,7 @@ interface TodoDB extends DBSchema {
 }
 
 const DB_NAME = 'ai-todo'
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 let database: Promise<IDBPDatabase<TodoDB>> | undefined
 
 export function db() {

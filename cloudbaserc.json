@@ -1,0 +1,16 @@
+{
+  "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
+  "envId": "ai-todo-pwa-d7gsanjwa129e069e",
+  "functionRoot": "scf",
+  "functions": [
+    {
+      "name": "ai-todo-api",
+      "runtime": "Nodejs20.19",
+      "handler": "index.main",
+      "timeout": 30,
+      "memorySize": 256,
+      "installDependency": true,
+      "description": "AI Todo single-user API"
+    }
+  ]
+}

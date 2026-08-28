@@ -2,10 +2,13 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
     "rootDir": ".",
     "outDir": "../scf/dist-server",
     "sourceMap": true,
     "declaration": false
   },
+  "include": ["./**/*.ts"],
   "exclude": ["../tests", "../node_modules"]
 }

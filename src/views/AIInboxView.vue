@@ -7,10 +7,11 @@ import { parseLocalInbox } from '../ai/localParser'
 import { useSpeech } from '../composables/useSpeech'
 import type { Draft, ParsedTask } from '../types'
 
-const emit = defineEmits<{ close: []; confirm: [ParsedTask[]] }>()
+const props = defineProps<{ draftId?: string }>()
+const emit = defineEmits<{ close: []; confirm: [ParsedTask[], string | undefined] }>()
 const content = ref(''), draft = ref<Draft>(), parsing = ref(false), error = ref(''), preview = ref<ParsedTask[]>([])
 let timer: number | undefined
-onMounted(async () => { draft.value = await draftRepository.latest(); if (draft.value) content.value = draft.value.content })
+onMounted(async () => { draft.value = props.draftId ? await draftRepository.get(props.draftId) : await draftRepository.latest(); if (draft.value) content.value = draft.value.content })
 watch(content, () => { window.clearTimeout(timer); timer = window.setTimeout(saveDraft, 300) })
 async function saveDraft(status: Draft['aiParseStatus'] = draft.value?.aiParseStatus ?? 'idle', lastError: string | null = null) {
   if (!content.value.trim() && !draft.value) return
@@ -33,9 +34,9 @@ function localPreview() {
   preview.value = parseLocalInbox(content.value)
 }
 function singlePreview() { preview.value = [{ ...parseNaturalTask(content.value), selected: true }] }
-async function confirm() { emit('confirm', preview.value.filter(item => item.selected)); if (draft.value) await draftRepository.delete(draft.value.id) }
-function setPreviewDate(task: ParsedTask, event: Event) { task.date = (event.target as HTMLInputElement).value || null; if (task.date) task.dateRange = null; else { task.time = null; task.endTime = null } }
-const canConfirm = computed(() => preview.value.some(task => task.selected) && preview.value.filter(task => task.selected).every(task => task.title.trim() && (!task.dateRange || task.dateRange.start <= task.dateRange.end) && (!task.time || Boolean(task.date))))
+function confirm() { emit('confirm', preview.value.filter(item => item.selected), draft.value?.id) }
+function setPreviewDate(task: ParsedTask, event: Event) { task.dueDate = (event.target as HTMLInputElement).value || null; if (task.dueDate) task.dateRange = null; else { task.startTime = null; task.endTime = null } }
+const canConfirm = computed(() => preview.value.some(task => task.selected) && preview.value.filter(task => task.selected).every(task => task.title.trim() && (!task.dateRange || task.dateRange.start <= task.dateRange.end) && (!task.startTime || Boolean(task.dueDate))))
 const speech = useSpeech(text => { content.value += `${content.value && !content.value.endsWith('\n') ? '，' : ''}${text}` })
 </script>
 <template><main class="full-view ai-view">
@@ -50,7 +51,7 @@ const speech = useSpeech(text => { content.value += `${content.value && !content
     <div class="preview-heading"><h2>识别到 {{ preview.length }} 个任务</h2><p>确认后才会写入任务库</p></div>
     <article v-for="(task, index) in preview" :key="index" class="preview-item" :class="{ excluded: !task.selected }">
       <button class="check checked" :class="{ off: !task.selected }" @click="task.selected = !task.selected">✓</button>
-      <div><input v-model="task.title" class="preview-title" /><div class="preview-fields"><input :value="task.date ?? ''" type="date" @change="setPreviewDate(task, $event)"/><input v-model="task.time" type="time" :disabled="!task.date"/><template v-if="task.dateRange"><input v-model="task.dateRange.start" type="date" aria-label="范围开始"/><span>–</span><input v-model="task.dateRange.end" type="date" aria-label="范围结束"/></template></div></div>
+      <div><input v-model="task.title" class="preview-title" /><div class="preview-fields"><input :value="task.dueDate ?? ''" type="date" @change="setPreviewDate(task, $event)"/><input v-model="task.startTime" type="time" :disabled="!task.dueDate"/><template v-if="task.dateRange"><input v-model="task.dateRange.start" type="date" aria-label="范围开始"/><span>–</span><input v-model="task.dateRange.end" type="date" aria-label="范围结束"/></template></div></div>
     </article>
     <div class="sticky-actions"><button @click="preview = []">返回修改</button><button class="primary" :disabled="!canConfirm" @click="confirm">全部添加</button></div>
   </section>

@@ -15,7 +15,11 @@ inputs:
   environment:
     variables:
       SCF_RUNTIME: "1"
-      STORAGE_ADAPTER: cloudbase
+      STORAGE_ADAPTER: cloudbase-postgres
+      CLOUDBASE_ENV_ID: ai-todo-pwa-d7gsanjwa129e069e
+      CLOUDBASE_REGION: ap-shanghai
+      CLOUDBASE_COLLECTION: ai_todo_state
+      CLOUDBASE_DOCUMENT_ID: single-user-state
   events:
     - apigw:
         parameters:

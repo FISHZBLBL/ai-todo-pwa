@@ -1,9 +1,11 @@
 node_modules/
 .pnpm-store/
 dist/
+.netlify/
 scf/dist-server/
 .env
 .env.local
+.cloudbaserc.local.json
 data/
 coverage/
 *.log

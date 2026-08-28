@@ -7,7 +7,7 @@ describe('AI Provider 重试策略', () => {
   it('非法 JSON 安全重试一次，保持原始用户内容且降级关闭 JSON mode', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, json: async () => ({ choices: [{ message: { content: 'not-json' } }] }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ tasks: [{ title:'测器件', date:'2026-08-28', dateRange:null, time:'15:00', endTime:null, url:null }] }) } }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ tasks: [{ title:'测器件', dueDate:'2026-08-28', dateRange:null, startTime:'15:00', endTime:null, url:null }] }) } }] }) })
     vi.stubGlobal('fetch', fetchMock)
     const { parseWithRetry } = await import('../server/ai/provider')
     await expect(parseWithRetry(context)).resolves.toMatchObject({ tasks: [{ title: '测器件' }] })

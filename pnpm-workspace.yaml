@@ -1,7 +1,15 @@
+packages:
+  - .
+
 allowBuilds:
+  '@netlify/content-engine': false
+  '@parcel/watcher': true
+  content-engine: false
+  contentful: false
   core-js-pure: true
+  es5-ext: false
   esbuild: true
+  lmdb: false
+  msgpackr-extract: false
   sharp: true
-onlyBuiltDependencies:
-  - esbuild
-  - sharp
+  unix-dgram: false
