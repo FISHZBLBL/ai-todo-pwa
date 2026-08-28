@@ -9,12 +9,16 @@ import { parseWithRetry, verifyDeepseekApiKey } from './ai/provider.js'
 import { cloudStore } from './storage.js'
 import { encryptDeepseekApiKey, maskedDeepseekKey, validateDeepseekApiKey } from './secrets.js'
 import { reconcileReminderTransitions } from './reminders/scheduler.js'
+import { rateLimitKey } from './rate-limit.js'
 
 export const app = express()
 app.set('trust proxy', 1); app.use(helmet()); app.use(cors({ origin: config.CORS_ORIGIN.split(',').map(v => v.trim()) })); app.use(express.json({ limit: '256kb' }))
-const normalLimit = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: 'draft-8', legacyHeaders: false })
-const aiLimit = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false })
-const authLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false })
+// The Netlify Lambda adapter can omit request.ip. Using Draft-8 headers then
+// crashes inside express-rate-limit before our route handlers are called.
+const rateLimitOptions = { keyGenerator: rateLimitKey, standardHeaders: false, legacyHeaders: false }
+const normalLimit = rateLimit({ windowMs: 60_000, limit: 120, ...rateLimitOptions })
+const aiLimit = rateLimit({ windowMs: 60_000, limit: 30, ...rateLimitOptions })
+const authLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, ...rateLimitOptions })
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 const clockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 const timestamp = z.string().datetime({ offset: true })
