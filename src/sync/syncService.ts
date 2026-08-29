@@ -21,8 +21,8 @@ export async function syncNow() {
     for (const task of response.tasks as Task[]) {
       const local = await taskRepository.get(task.id)
       if (!local || task.updatedAt > local.updatedAt) await taskRepository.save(task, false)
-      else if (task.updatedAt === local.updatedAt && (task.reminderEventId !== local.reminderEventId || task.reminderSentAt !== local.reminderSentAt)) {
-        await taskRepository.save({ ...local, reminderEventId: task.reminderEventId ?? null, reminderSentAt: task.reminderSentAt ?? null }, false)
+      else if (task.updatedAt === local.updatedAt && JSON.stringify(task.reminders) !== JSON.stringify(local.reminders)) {
+        await taskRepository.save({ ...local, reminders: task.reminders ?? [] }, false)
       }
     }
     for (const draft of response.drafts as Draft[]) {

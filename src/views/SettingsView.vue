@@ -1,16 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../services/api'
-import { createExport, downloadText, importData, tasksToIcs } from '../utils/export'
-import { getSettings } from '../storage/database'
+import { getSettings, saveSettings } from '../storage/database'
 import { syncNow } from '../sync/syncService'
-import { useTaskStore } from '../stores/tasks'
 import type { Settings } from '../types'
 
 interface DeepseekStatus { configured: boolean; maskedKey: string | null; updatedAt: string | null }
 
 const emit = defineEmits<{ close: []; logout: [] }>()
-const store = useTaskStore()
 const settings = ref<Settings>()
 const aiStatus = ref('检测中…')
 const deepseek = ref<DeepseekStatus>({ configured: false, maskedKey: null, updatedAt: null })
@@ -22,6 +19,8 @@ const pushRegistered = ref(false)
 const pushMessage = ref('')
 const syncMessage = ref('')
 const syncBusy = ref(false)
+const summaryBusy = ref(false)
+const summaryMessage = ref('')
 const pushLabel = computed(() => pushPermission.value === 'granted' ? (pushRegistered.value ? '已订阅' : '未订阅') : ({ denied: '已拒绝', default: '未授权', unsupported: '不支持' }[pushPermission.value]))
 
 async function detectAi() {
@@ -33,15 +32,6 @@ async function detectAi() {
   } catch (error) { aiStatus.value = '连接失败'; keyMessage.value = error instanceof Error ? error.message : '无法连接 AI 服务' }
 }
 onMounted(async () => { settings.value = await getSettings(); await Promise.all([detectAi(), refreshPushStatus()]) })
-
-async function exportJson() { downloadText(`todo-backup-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(await createExport(), null, 2), 'application/json') }
-async function handleImport(event: Event) {
-  const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file) return
-  try { downloadText(`todo-pre-import-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(await createExport(), null, 2), 'application/json'); const mode = confirm('导入前备份已生成。\n确定要覆盖现有数据吗？\n选择“取消”将合并数据。') ? 'replace' : 'merge'; await importData(JSON.parse(await file.text()), mode); await store.load(); void syncNow().catch(() => undefined) }
-  catch (error) { alert(`导入失败：${error instanceof Error ? error.message : '文件格式无效'}`) }
-  finally { input.value = '' }
-}
-function exportIcs() { try { downloadText('todo.ics', tasksToIcs(store.active.filter(task => task.dueDate && task.startTime)), 'text/calendar') } catch (error) { alert((error as Error).message) } }
 
 async function saveDeepseekKey() {
   if (!apiKey.value.trim()) return
@@ -97,11 +87,23 @@ async function runSync() {
   catch (error) { syncMessage.value = error instanceof Error ? error.message : '同步失败' }
   finally { syncBusy.value = false }
 }
+async function saveDailySummaryTime() {
+  if (!settings.value) return
+  summaryBusy.value = true; summaryMessage.value = ''
+  try {
+    const next = { ...settings.value, updatedAt: new Date().toISOString() }
+    await saveSettings(next, true)
+    settings.value = next
+    await syncNow()
+    settings.value = await getSettings()
+    summaryMessage.value = '每日汇总提醒时间已更新'
+  } catch (error) { summaryMessage.value = error instanceof Error ? error.message : '保存失败' }
+  finally { summaryBusy.value = false }
+}
 </script>
 
 <template><main class="full-view settings-view"><header class="view-header"><button @click="emit('close')">返回</button><h1>设置</h1><span /></header>
-  <section><h2>提醒</h2><div class="setting-row"><div><strong>每日汇总提醒</strong><small>每天 08:00 汇总当天任务；单项提醒在任务中独立设置</small></div><span>08:00</span></div></section>
-  <section><h2>数据</h2><div class="setting-card data-actions"><button class="setting-row" @click="exportJson"><span><strong>导出 JSON</strong><small>备份任务、草稿与设置</small></span><span>›</span></button><label class="setting-row file-row"><span><strong>导入 JSON</strong><small>从此前备份恢复或合并数据</small></span><span>›</span><input type="file" accept="application/json" @change="handleImport"/></label><button class="setting-row" @click="exportIcs"><span><strong>导出日历文件 ICS</strong><small>仅导出已设置日期和开始时间的任务</small></span><span>›</span></button></div></section>
+  <section><h2>提醒</h2><div class="setting-row"><div><strong>每日汇总提醒</strong><small>汇总逾期与当天任务；单项提醒在任务中独立设置</small></div><input v-if="settings" v-model="settings.dailySummaryTime" type="time" :disabled="summaryBusy" @change="saveDailySummaryTime" aria-label="每日汇总提醒时间"/></div><small v-if="summaryMessage" class="section-message">{{ summaryMessage }}</small></section>
   <section><h2>AI</h2><div class="setting-card"><div class="setting-row"><div><strong>DeepSeek</strong><small v-if="deepseek.maskedKey">当前密钥 {{ deepseek.maskedKey }}</small></div><span class="muted">{{ aiStatus }}</span></div><form class="api-key-form" @submit.prevent="saveDeepseekKey"><label>{{ deepseek.configured ? '替换 API Key' : 'API Key' }}<input v-model="apiKey" type="password" autocomplete="off" placeholder="sk-…" /></label><div><button type="button" @click="detectAi">重新检测</button><button v-if="deepseek.configured" type="button" class="danger-text" :disabled="keyBusy" @click="deleteDeepseekKey">删除</button><button class="primary" :disabled="keyBusy || !apiKey.trim()">{{ keyBusy ? '处理中…' : '验证并保存' }}</button></div><small v-if="keyMessage" class="setting-message">{{ keyMessage }}</small></form></div></section>
   <section><h2>同步</h2><div class="setting-card"><button class="setting-row" :disabled="syncBusy" @click="runSync"><span><strong>同步到腾讯云 COS</strong><small>任务、草稿与设置会安全同步到私有存储</small></span><span class="muted">{{ settings?.lastSyncAt ? new Date(settings.lastSyncAt).toLocaleString() : '尚未同步' }}</span></button></div><small v-if="syncMessage" class="section-message">{{ syncMessage }}</small></section>
   <section><h2>通知</h2><button class="setting-row" @click="enablePush"><span>Web Push</span><span class="muted">{{ pushLabel }}</span></button><button v-if="pushRegistered" class="setting-row danger-text" @click="disablePush"><span>取消当前设备订阅</span><span>›</span></button><small v-if="pushMessage" class="section-message">{{ pushMessage }}</small></section>

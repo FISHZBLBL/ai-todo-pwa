@@ -1,4 +1,7 @@
 export type TaskSource = 'manual' | 'ai'
+export type ReminderMode = 'auto' | 'explicit' | 'off'
+export type ReminderSource = 'auto' | 'explicit'
+export interface TaskReminder { id: string; at: string; eventId: string | null; sentAt: string | null; source: ReminderSource }
 
 export interface DateRange { start: string; end: string }
 
@@ -11,10 +14,8 @@ export interface Task {
   dateRange?: DateRange | null
   startTime?: string | null
   endTime?: string | null
-  reminderEnabled: boolean
-  reminderAt?: string | null
-  reminderEventId?: string | null
-  reminderSentAt?: string | null
+  reminderMode: ReminderMode
+  reminders: TaskReminder[]
   pinned: boolean
   /** Manual position within the current date group; omitted for legacy tasks. */
   sortOrder?: number | null
@@ -48,12 +49,13 @@ export interface Settings {
   notificationPermission?: NotificationPermission | 'unsupported'
 }
 
-export interface TodoExport {
-  schemaVersion: number
-  exportedAt: string
-  tasks: Task[]
-  drafts: Draft[]
-  settings: Settings
+export type ReminderPeriod = 'morning' | 'noon' | 'afternoon' | 'evening' | 'night'
+export interface ParsedReminder {
+  requested: true
+  date: string | null
+  time: string | null
+  /** Preview-only wording for an explicitly requested but still ambiguous reminder. */
+  period: ReminderPeriod | null
 }
 
 export interface ParsedTask {
@@ -63,6 +65,9 @@ export interface ParsedTask {
   startTime: string | null
   endTime: string | null
   url: string | null
+  reminders?: ParsedReminder[]
+  /** @deprecated parser compatibility for drafts created before multi-reminder. */
+  reminder?: ParsedReminder | null
   selected?: boolean
 }
 

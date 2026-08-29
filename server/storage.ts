@@ -7,12 +7,15 @@ import { CosObjectStore } from './cos.js'
 import type { EncryptedSecret } from './secrets.js'
 
 interface StoredEntity { id: string; updatedAt: string; deletedAt?: string | null }
-interface StoredTask extends StoredEntity { title?: string; dueDate?: string | null; dateRange?: { start: string; end: string } | null; startTime?: string | null; completed?: boolean; reminderEnabled?: boolean; reminderAt?: string | null; reminderEventId?: string | null; reminderSentAt?: string | null }
+interface StoredReminder { id: string; at: string; eventId?: string | null; sentAt?: string | null; source?: 'auto'|'explicit' }
+interface StoredTask extends StoredEntity { title?: string; dueDate?: string | null; dateRange?: { start: string; end: string } | null; startTime?: string | null; completed?: boolean; reminderMode?: 'auto' | 'explicit' | 'off'; reminders?: StoredReminder[]; reminderEnabled?: boolean; reminderAt?: string | null; reminderEventId?: string | null; reminderSentAt?: string | null }
 interface PushRecord { endpoint: string; keys?: { auth?: string; p256dh?: string }; appUrl?: string }
 interface StoredSettings extends StoredEntity { dailySummaryTime: string; timezone: string; schemaVersion: number }
-interface CloudData { tasks: StoredTask[]; drafts: StoredEntity[]; settings: StoredSettings | null; subscriptions: PushRecord[]; dailySummarySentDates: string[]; deepseekSecret: EncryptedSecret | null }
+export interface DailySummarySchedule { eventId: string; scheduledFor: string; dailySummaryTime: string; timezone: string }
+interface CloudData { tasks: StoredTask[]; drafts: StoredEntity[]; settings: StoredSettings | null; subscriptions: PushRecord[]; dailySummarySentDates: string[]; dailySummarySchedule: DailySummarySchedule | null; deepseekSecret: EncryptedSecret | null }
 export interface ReminderTransition { todoId: string; oldEventIds: string[] }
-const empty = (): CloudData => ({ tasks: [], drafts: [], settings: null, subscriptions: [], dailySummarySentDates: [], deepseekSecret: null })
+const remindersOf = (task?: StoredTask) => task?.reminders ?? (task?.reminderEnabled && task.reminderAt ? [{ id: 'legacy', at: task.reminderAt, eventId: task.reminderEventId ?? null, sentAt: task.reminderSentAt ?? null, source: task.reminderMode === 'auto' ? 'auto' as const : 'explicit' as const }] : [])
+const empty = (): CloudData => ({ tasks: [], drafts: [], settings: null, subscriptions: [], dailySummarySentDates: [], dailySummarySchedule: null, deepseekSecret: null })
 let lock = Promise.resolve()
 
 const cloudDataSchema = z.object({
@@ -21,6 +24,7 @@ const cloudDataSchema = z.object({
   settings: z.object({ id: z.string(), updatedAt: z.string(), dailySummaryTime: z.string(), timezone: z.string(), schemaVersion: z.number() }).passthrough().nullable().default(null),
   subscriptions: z.array(z.object({ endpoint: z.string(), keys: z.object({ auth: z.string().optional(), p256dh: z.string().optional() }).optional(), appUrl: z.string().optional() })).default([]),
   dailySummarySentDates: z.array(z.string()).default([]),
+  dailySummarySchedule: z.object({ eventId: z.string(), scheduledFor: z.string().datetime({ offset: true }), dailySummaryTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), timezone: z.string().min(1) }).nullable().default(null),
   deepseekSecret: z.object({ version: z.literal(1), algorithm: z.literal('aes-256-gcm'), ciphertext: z.string(), iv: z.string(), authTag: z.string(), lastFour: z.string(), createdAt: z.string(), updatedAt: z.string() }).nullable().default(null)
 })
 
@@ -242,16 +246,15 @@ export const cloudStore = {
         if (change.entity === 'task') {
           const previous = index >= 0 ? data.tasks[index] : undefined
           const incoming = change.value as StoredTask
-          const previousActive = Boolean(previous?.reminderEnabled && previous.reminderAt && !previous.completed && !previous.deletedAt)
-          const incomingActive = Boolean(incoming.reminderEnabled && incoming.reminderAt && !incoming.completed && !incoming.deletedAt)
-          const sameSchedule = previousActive && incomingActive && previous?.reminderAt === incoming.reminderAt
-          const next: StoredTask = {
-            ...incoming,
-            reminderEventId: sameSchedule ? previous?.reminderEventId ?? null : null,
-            reminderSentAt: sameSchedule ? previous?.reminderSentAt ?? null : null
-          }
-          if (!sameSchedule) touch(incoming.id, previous?.reminderEventId)
-          else touch(incoming.id)
+          const previousReminders = remindersOf(previous)
+          const nextReminders = remindersOf(incoming).map(reminder => {
+            const old = previousReminders.find(value => value.id === reminder.id && value.at === reminder.at)
+            return { ...reminder, eventId: old?.eventId ?? null, sentAt: old?.sentAt ?? null }
+          })
+          for (const old of previousReminders) if (!nextReminders.some(value => value.id === old.id && value.at === old.at) && old.eventId) touch(incoming.id, old.eventId)
+          const { reminderEnabled: _enabled, reminderAt: _at, reminderEventId: _event, reminderSentAt: _sent, ...clean } = incoming
+          const next: StoredTask = { ...clean, reminders: nextReminders }
+          touch(incoming.id)
           if (index < 0) data.tasks.push(next); else data.tasks[index] = next
           continue
         }
@@ -264,9 +267,10 @@ export const cloudStore = {
   async removeSubscription(endpoint: string) { return mutate(data => { data.subscriptions = data.subscriptions.filter(item => item.endpoint !== endpoint) }) },
   async hasSubscription(endpoint: string) { return (await read()).subscriptions.some(item => item.endpoint === endpoint) },
   async getTask(todoId: string) { return (await read()).tasks.find(task => task.id === todoId) ?? null },
-  async setReminderEvent(todoId: string, reminderAt: string, eventId: string) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task || !task.reminderEnabled || task.reminderAt !== reminderAt || task.completed || task.deletedAt || task.reminderEventId) return false; task.reminderEventId = eventId; task.reminderSentAt = null; return true }) },
-  async clearReminderEvent(todoId: string, eventId: string) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task || task.reminderEventId !== eventId) return false; task.reminderEventId = null; return true }) },
-  async markReminderSent(todoId: string, eventId: string, sentAt = new Date().toISOString()) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task || task.reminderEventId !== eventId || task.reminderSentAt) return false; task.reminderSentAt = sentAt; return true }) },
+  async setReminderEvent(todoId: string, reminderIdOrAt: string, atOrEventId: string, eventId?: string) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task) return false; if (!eventId) { if (!task.reminderEnabled || task.reminderAt !== reminderIdOrAt || task.completed || task.deletedAt || task.reminderEventId) return false; task.reminderEventId = atOrEventId; task.reminderSentAt = null; return true } const reminder = remindersOf(task).find(item => item.id === reminderIdOrAt); if (!reminder || reminder.at !== atOrEventId || task.completed || task.deletedAt || reminder.eventId) return false; reminder.eventId = eventId; reminder.sentAt = null; task.reminders = remindersOf(task); return true }) },
+  async markReminderSent(todoId: string, reminderIdOrEventId: string, eventIdOrSentAt?: string, sentAt = new Date().toISOString()) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task) return false; if (!eventIdOrSentAt) { if (!task.reminderEnabled || task.reminderEventId !== reminderIdOrEventId || task.reminderSentAt) return false; task.reminderSentAt = sentAt; return true } const reminder = remindersOf(task).find(item => item.id === reminderIdOrEventId); if (!reminder || reminder.eventId !== eventIdOrSentAt || reminder.sentAt) return false; reminder.sentAt = sentAt; task.reminders = remindersOf(task); return true }) },
+  async getDailySummaryScheduleState() { const data = await read(); return { settings: data.settings ?? { dailySummaryTime: '08:00', timezone: config.APP_TIMEZONE }, schedule: data.dailySummarySchedule } },
+  async setDailySummarySchedule(schedule: DailySummarySchedule | null) { return mutate(data => { data.dailySummarySchedule = schedule }) },
   async claimDailySummary(date: string) { return mutate(data => { data.dailySummarySentDates = data.dailySummarySentDates.filter(value => value >= date); if (data.dailySummarySentDates.includes(date)) return false; data.dailySummarySentDates.push(date); return true }) },
   async releaseDailySummary(date: string) { return mutate(data => { data.dailySummarySentDates = data.dailySummarySentDates.filter(value => value !== date) }) },
   async purgeExpiredTombstones(now = new Date()) { const cutoff = now.getTime() - 30 * 86400000; return mutate(data => { data.tasks = data.tasks.filter(task => !task.deletedAt || Date.parse(task.deletedAt) >= cutoff); data.drafts = data.drafts.filter(draft => !draft.deletedAt || Date.parse(draft.deletedAt) >= cutoff) }) },

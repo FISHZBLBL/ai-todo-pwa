@@ -20,20 +20,23 @@ export async function cancelReminderEvents(eventIds: string[], sender: AsyncEven
 export async function reconcileReminder(transition: ReminderTransition, sender: AsyncEventSender = defaultSender(), now = Date.now()) {
   await cancelReminderEvents(transition.oldEventIds, sender)
   const task = await cloudStore.getTask(transition.todoId)
-  if (!task?.reminderEnabled || !task.reminderAt || task.completed || task.deletedAt) return { skipped: 'disabled' as const }
-  if (task.reminderSentAt) return { skipped: 'sent' as const }
-  if (task.reminderEventId) return { skipped: 'scheduled' as const, eventId: task.reminderEventId }
-  const reminderAt = Date.parse(task.reminderAt)
-  if (!Number.isFinite(reminderAt)) throw new Error('提醒时间无效')
-  if (reminderAt <= now) return { skipped: 'past' as const }
-  if (reminderAt >= now + MAX_DELAY_MS) throw new Error('提醒时间不能超过一年')
-  const result = await sender.send(TODO_REMINDER_EVENT, { data: { todoId: task.id }, delayUntil: reminderAt })
-  if (result.sendStatus !== 'succeeded') throw new Error('创建提醒事件失败')
-  if (!(await cloudStore.setReminderEvent(task.id, task.reminderAt, result.eventId))) {
-    await cancelReminderEvents([result.eventId], sender)
-    return { skipped: 'changed' as const }
+  if (!task || task.completed || task.deletedAt) return { skipped: 'disabled' as const }
+  const legacy = !task.reminders
+  const reminders = task.reminders ?? (task.reminderEnabled && task.reminderAt ? [{ id: 'legacy', at: task.reminderAt, eventId: task.reminderEventId ?? null, sentAt: task.reminderSentAt ?? null }] : [])
+  const created: string[] = []
+  for (const reminder of reminders) {
+    if (reminder.sentAt || reminder.eventId) continue
+    const reminderAt = Date.parse(reminder.at)
+    if (!Number.isFinite(reminderAt)) throw new Error('提醒时间无效')
+    if (reminderAt <= now) continue
+    if (reminderAt >= now + MAX_DELAY_MS) throw new Error('提醒时间不能超过一年')
+    const result = await sender.send(TODO_REMINDER_EVENT, { data: legacy ? { todoId: task.id } : { todoId: task.id, reminderId: reminder.id }, delayUntil: reminderAt })
+    if (result.sendStatus !== 'succeeded') throw new Error('创建提醒事件失败')
+    const stored = legacy ? await cloudStore.setReminderEvent(task.id, reminder.at, result.eventId) : await cloudStore.setReminderEvent(task.id, reminder.id, reminder.at, result.eventId)
+    if (!stored) { await cancelReminderEvents([result.eventId], sender); continue }
+    created.push(result.eventId)
   }
-  return { eventId: result.eventId }
+  return legacy && created.length === 1 ? { eventId: created[0] } : { eventIds: created }
 }
 
 export async function reconcileReminderTransitions(transitions: ReminderTransition[], sender?: AsyncEventSender) {

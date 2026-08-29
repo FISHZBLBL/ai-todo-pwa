@@ -14,6 +14,6 @@ export function parseLocalInbox(content: string, now = new Date()): ParsedTask[]
       parsed.dueDate = inheritedDueDate
       parsed.dateRange = inheritedRange
     }
-    return { ...parsed, selected: true }
+    return { ...parsed, reminders: [], selected: true }
   })
 }

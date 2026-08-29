@@ -1,38 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
-const getTask = vi.fn()
-const setReminderEvent = vi.fn()
+const getTask = vi.fn(), setReminderEvent = vi.fn()
 vi.mock('../server/storage', () => ({ cloudStore: { getTask, setReminderEvent } }))
-
-describe('单项提醒事件调度', () => {
-  beforeEach(() => { getTask.mockReset(); setReminderEvent.mockReset() })
-
-  it('只发送 todoId，并把 reminderAt 作为 delayUntil', async () => {
-    const reminderAt = '2026-08-28T10:00:00.000Z'
-    getTask.mockResolvedValue({ id: 'todo-1', reminderEnabled: true, reminderAt, reminderEventId: null, reminderSentAt: null, completed: false, deletedAt: null })
-    setReminderEvent.mockResolvedValue(true)
-    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'event-1' })) }
-    const { reconcileReminder } = await import('../server/reminders/scheduler')
-    await expect(reconcileReminder({ todoId: 'todo-1', oldEventIds: [] }, sender, Date.parse('2026-08-28T09:00:00.000Z'))).resolves.toEqual({ eventId: 'event-1' })
-    expect(sender.send).toHaveBeenCalledWith('todo.reminder', { data: { todoId: 'todo-1' }, delayUntil: Date.parse(reminderAt) })
-    expect(setReminderEvent).toHaveBeenCalledWith('todo-1', reminderAt, 'event-1')
-  })
-
-  it('修改提醒时先取消旧 eventId 再创建新事件', async () => {
-    getTask.mockResolvedValue({ id: 'todo-1', reminderEnabled: true, reminderAt: '2026-08-28T11:00:00.000Z', reminderEventId: null, reminderSentAt: null, completed: false, deletedAt: null })
-    setReminderEvent.mockResolvedValue(true)
-    const sender = { send: vi.fn(async (name: string) => ({ sendStatus: 'succeeded' as const, eventId: name === 'awl:delete-events' ? 'cancel-command' : 'event-2' })) }
-    const { reconcileReminder } = await import('../server/reminders/scheduler')
-    await reconcileReminder({ todoId: 'todo-1', oldEventIds: ['event-1'] }, sender, Date.parse('2026-08-28T09:00:00.000Z'))
-    expect(sender.send.mock.calls[0]).toEqual(['awl:delete-events', { data: { eventIds: ['event-1'] } }])
-    expect(sender.send.mock.calls[1][0]).toBe('todo.reminder')
-  })
-
-  it('完成或删除的任务只取消旧事件，不创建新事件', async () => {
-    getTask.mockResolvedValue({ id: 'todo-1', reminderEnabled: true, reminderAt: '2026-08-28T11:00:00.000Z', completed: true, deletedAt: null })
-    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'cancel-command' })) }
-    const { reconcileReminder } = await import('../server/reminders/scheduler')
-    await expect(reconcileReminder({ todoId: 'todo-1', oldEventIds: ['event-1'] }, sender, Date.parse('2026-08-28T09:00:00.000Z'))).resolves.toEqual({ skipped: 'disabled' })
-    expect(sender.send).toHaveBeenCalledOnce()
-  })
+const at = (hour: number) => `2026-08-28T${`${hour}`.padStart(2, '0')}:00:00.000Z`
+const task = (reminders: unknown[], extra = {}) => ({ id: 'todo-1', reminders, completed: false, deletedAt: null, ...extra })
+describe('多提醒事件调度', () => {
+  beforeEach(() => { getTask.mockReset(); setReminderEvent.mockReset(); setReminderEvent.mockResolvedValue(true) })
+  it('为多条 reminder 创建各自独立的 event', async () => { getTask.mockResolvedValue(task([{ id: 'r1', at: at(10), eventId: null, sentAt: null }, { id: 'r2', at: at(11), eventId: null, sentAt: null }])); const sender = { send: vi.fn(async (_: string) => ({ sendStatus: 'succeeded' as const, eventId: `e${sender.send.mock.calls.length}` })) }; const { reconcileReminder } = await import('../server/reminders/scheduler'); await expect(reconcileReminder({ todoId: 'todo-1', oldEventIds: [] }, sender, Date.parse(at(9)))).resolves.toEqual({ eventIds: ['e1', 'e2'] }); expect(sender.send).toHaveBeenNthCalledWith(1, 'todo.reminder', { data: { todoId: 'todo-1', reminderId: 'r1' }, delayUntil: Date.parse(at(10)) }); expect(setReminderEvent).toHaveBeenCalledWith('todo-1', 'r2', at(11), 'e2') })
+  it('已有 event 的 reminder 不会重建', async () => { getTask.mockResolvedValue(task([{ id: 'r1', at: at(10), eventId: 'e1', sentAt: null }])); const sender = { send: vi.fn() }; const { reconcileReminder } = await import('../server/reminders/scheduler'); await reconcileReminder({ todoId: 'todo-1', oldEventIds: [] }, sender, Date.parse(at(9))); expect(sender.send).not.toHaveBeenCalled() })
+  it('修改一条提醒只取消它的旧 event 并调度新的', async () => { getTask.mockResolvedValue(task([{ id: 'r1', at: at(11), eventId: null, sentAt: null }, { id: 'r2', at: at(12), eventId: 'e2', sentAt: null }])); const sender = { send: vi.fn(async (name: string) => ({ sendStatus: 'succeeded' as const, eventId: name === 'awl:delete-events' ? 'cancel' : 'e1new' })) }; const { reconcileReminder } = await import('../server/reminders/scheduler'); await reconcileReminder({ todoId: 'todo-1', oldEventIds: ['e1old'] }, sender, Date.parse(at(9))); expect(sender.send).toHaveBeenNthCalledWith(1, 'awl:delete-events', { data: { eventIds: ['e1old'] } }); expect(sender.send).toHaveBeenCalledTimes(2) })
+  it('完成、删除和过去时间不调度新 event', async () => { const { reconcileReminder } = await import('../server/reminders/scheduler'); const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'x' })) }; getTask.mockResolvedValue(task([], { completed: true })); await reconcileReminder({ todoId: 'todo-1', oldEventIds: ['e1', 'e2'] }, sender, Date.parse(at(9))); getTask.mockResolvedValue(task([{ id: 'past', at: at(8), eventId: null, sentAt: null }])); await reconcileReminder({ todoId: 'todo-1', oldEventIds: [] }, sender, Date.parse(at(9))); expect(sender.send).toHaveBeenCalledOnce() })
 })

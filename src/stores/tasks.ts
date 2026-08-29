@@ -5,7 +5,8 @@ import { formatTaskDate, isOverdue, toDateKey } from '../utils/date'
 import type { ParsedTask, Task } from '../types'
 import { extractFirstUrl } from '../utils/url'
 import { syncNow } from '../sync/syncService'
-import { automaticReminder } from '../utils/reminder'
+import { resolveReminderState } from '../utils/reminder'
+import { parsedTaskToTaskInput } from '../ai/reminderPreview'
 
 const nowIso = () => new Date().toISOString()
 export const useTaskStore = defineStore('tasks', () => {
@@ -22,16 +23,17 @@ export const useTaskStore = defineStore('tasks', () => {
   function build(input: Partial<Task> & Pick<Task, 'title'>): Task {
     const now = nowIso()
     const dueDate = input.dueDate ?? null, startTime = input.startTime ?? null
-    const automatic = automaticReminder(dueDate, startTime)
-    return { id: crypto.randomUUID(), title: input.title.trim(), note: input.note ?? null, url: input.url ?? extractFirstUrl(input.title), dueDate, dateRange: input.dateRange ?? null, startTime, endTime: input.endTime ?? null, reminderEnabled: input.reminderEnabled ?? automatic.reminderEnabled, reminderAt: input.reminderAt ?? automatic.reminderAt, reminderEventId: null, reminderSentAt: null, pinned: input.pinned ?? false, sortOrder: null, completed: false, completedAt: null, createdAt: now, updatedAt: now, deletedAt: null, recurrence: null, source: input.source ?? 'manual' }
+    const reminder = resolveReminderState(undefined, input)
+    return { id: crypto.randomUUID(), title: input.title.trim(), note: input.note ?? null, url: input.url ?? extractFirstUrl(input.title), dueDate, dateRange: input.dateRange ?? null, startTime, endTime: input.endTime ?? null, ...reminder, pinned: input.pinned ?? false, sortOrder: null, completed: false, completedAt: null, createdAt: now, updatedAt: now, deletedAt: null, recurrence: null, source: input.source ?? 'manual' }
   }
   function scheduleSync() { window.clearTimeout(syncTimer); syncTimer = window.setTimeout(() => void syncNow().catch(() => undefined), 100) }
   async function create(input: Partial<Task> & Pick<Task, 'title'>) { const task = build(input); tasks.value.push(task); await taskRepository.save(task); scheduleSync(); return task }
-  async function createParsed(items: ParsedTask[]) { for (const item of items.filter(item => item.selected !== false)) await create({ ...item, source: 'ai' }) }
+  async function createParsed(items: ParsedTask[]) { for (const item of items.filter(item => item.selected !== false)) await create({ ...parsedTaskToTaskInput(item), source: 'ai' }) }
   async function update(id: string, patch: Partial<Task>) {
     const index = tasks.value.findIndex(task => task.id === id); if (index < 0) return
     const normalized = patch.title && patch.url == null ? { ...patch, url: extractFirstUrl(patch.title) } : patch
-    const task = { ...tasks.value[index], ...normalized, updatedAt: nowIso() }; tasks.value[index] = task; await taskRepository.save(task); scheduleSync()
+    const reminder = resolveReminderState(tasks.value[index], normalized)
+    const task = { ...tasks.value[index], ...normalized, ...reminder, updatedAt: nowIso() }; tasks.value[index] = task; await taskRepository.save(task); scheduleSync()
   }
   async function complete(id: string) { await update(id, { completed: true, completedAt: nowIso() }) }
   async function restore(id: string) { await update(id, { completed: false, completedAt: null }) }

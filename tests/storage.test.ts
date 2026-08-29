@@ -4,7 +4,7 @@ import { draftRepository } from '../src/repositories/draftRepository'
 import { resetDatabaseForTests } from '../src/storage/database'
 import type { Task } from '../src/types'
 
-const task = (updatedAt = '2026-08-27T00:00:00.000Z'): Task => ({ id: crypto.randomUUID(), title: '测试', dueDate: null, dateRange: null, startTime: null, endTime: null, reminderEnabled: false, pinned: false, completed: false, createdAt: updatedAt, updatedAt, source: 'manual', recurrence: null })
+const task = (updatedAt = '2026-08-27T00:00:00.000Z'): Task => ({ id: crypto.randomUUID(), title: '测试', dueDate: null, dateRange: null, startTime: null, endTime: null, reminderMode: 'off', reminders: [], pinned: false, completed: false, createdAt: updatedAt, updatedAt, source: 'manual', recurrence: null })
 describe('任务存储', () => {
   beforeEach(async () => resetDatabaseForTests())
   it('创建和更新', async () => { const item = task(); await taskRepository.save(item); await taskRepository.save({ ...item, title: '更新', updatedAt: '2026-08-28T00:00:00.000Z' }); expect((await taskRepository.get(item.id))?.title).toBe('更新') })

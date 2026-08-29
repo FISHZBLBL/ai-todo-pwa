@@ -1,20 +1,22 @@
 import { db } from '../storage/database'
 import type { SyncChange, Task } from '../types'
+import { automaticReminder, explicitReminder } from '../utils/reminder'
 
 const queue = async (value: Task) => (await db()).add('syncQueue', { entity: 'task', value, queuedAt: new Date().toISOString() } satisfies SyncChange)
 
 export function normalizeTask(value: Task | (Partial<Task> & Record<string, unknown>)): Task {
-  const legacy = value as Partial<Task> & { date?: string | null; time?: string | null }
+  const legacy = value as Partial<Task> & { date?: string | null; time?: string | null; reminderEnabled?: boolean; reminderAt?: string | null; reminderEventId?: string | null; reminderSentAt?: string | null }
   const dueDate = value.dueDate ?? legacy.date ?? null
   const startTime = value.startTime ?? legacy.time ?? null
+  const auto = automaticReminder(dueDate, startTime).reminders ?? []
+  const reminders = Array.isArray(value.reminders) ? value.reminders : legacy.reminderEnabled && legacy.reminderAt ? [legacy.reminderMode === 'auto' ? { ...(auto[0] ?? explicitReminder(legacy.reminderAt, 'legacy')), eventId: legacy.reminderEventId ?? null, sentAt: legacy.reminderSentAt ?? null } : { ...explicitReminder(legacy.reminderAt, 'legacy'), eventId: legacy.reminderEventId ?? null, sentAt: legacy.reminderSentAt ?? null }] : []
+  const { reminderEnabled: _enabled, reminderAt: _at, reminderEventId: _event, reminderSentAt: _sent, ...rest } = value as typeof legacy
   return {
-    ...value,
+    ...rest,
     dueDate,
     startTime,
-    reminderEnabled: value.reminderEnabled ?? false,
-    reminderAt: value.reminderAt ?? null,
-    reminderEventId: value.reminderEventId ?? null,
-    reminderSentAt: value.reminderSentAt ?? null,
+    reminderMode: value.reminderMode ?? (reminders.length ? (reminders[0]?.source === 'auto' ? 'auto' : 'explicit') : 'off'),
+    reminders,
     sortOrder: value.sortOrder ?? null
   } as Task
 }
