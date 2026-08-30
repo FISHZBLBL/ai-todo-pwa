@@ -66,8 +66,6 @@ export interface ParsedTask {
   endTime: string | null
   url: string | null
   reminders?: ParsedReminder[]
-  /** @deprecated parser compatibility for drafts created before multi-reminder. */
-  reminder?: ParsedReminder | null
   selected?: boolean
 }
 

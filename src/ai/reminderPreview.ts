@@ -2,7 +2,7 @@ import type { ParsedTask, Task } from '../types'
 import { explicitReminder, reminderAtFromStartTime } from '../utils/reminder'
 
 export function hasIncompleteReminder(task: ParsedTask) {
-  return [...(task.reminders ?? []), ...(task.reminder ? [task.reminder] : [])].some(reminder => !reminder.date || !reminder.time)
+  return (task.reminders ?? []).some(reminder => !reminder.date || !reminder.time)
 }
 
 export function parsedTaskToTaskInput(task: ParsedTask): Partial<Task> & Pick<Task, 'title'> {
@@ -14,7 +14,7 @@ export function parsedTaskToTaskInput(task: ParsedTask): Partial<Task> & Pick<Ta
     endTime: task.endTime,
     url: task.url
   }
-  const reminders = [...(task.reminders ?? []), ...(task.reminder ? [task.reminder] : [])].flatMap(reminder => {
+  const reminders = (task.reminders ?? []).flatMap(reminder => {
     if (!reminder.date || !reminder.time) return []
     const at = reminderAtFromStartTime(reminder.date, reminder.time)
     return at ? [explicitReminder(at)] : []
