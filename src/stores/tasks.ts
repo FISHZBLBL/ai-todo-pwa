@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { taskRepository } from '../repositories/taskRepository'
 import { formatTaskDate, isOverdue, toDateKey } from '../utils/date'
@@ -13,8 +13,29 @@ export const useTaskStore = defineStore('tasks', () => {
   const tasks = ref<Task[]>([])
   const loading = ref(true)
   let undoTimer: number | undefined
+  let undoExpiresAt: number | undefined
   let syncTimer: number | undefined
   const lastDeleted = ref<Task | null>(null)
+
+  function clearUndoToast() {
+    window.clearTimeout(undoTimer)
+    undoTimer = undefined
+    undoExpiresAt = undefined
+    lastDeleted.value = null
+  }
+  function expireUndoToast() { if (undoExpiresAt != null && Date.now() >= undoExpiresAt) clearUndoToast() }
+  function scheduleUndoToast() {
+    window.clearTimeout(undoTimer)
+    undoExpiresAt = Date.now() + 5000
+    undoTimer = window.setTimeout(clearUndoToast, 5000)
+  }
+  document.addEventListener('visibilitychange', expireUndoToast)
+  window.addEventListener('pageshow', expireUndoToast)
+  onScopeDispose(() => {
+    clearUndoToast()
+    document.removeEventListener('visibilitychange', expireUndoToast)
+    window.removeEventListener('pageshow', expireUndoToast)
+  })
 
   const active = computed(() => tasks.value.filter(task => !task.deletedAt && !task.completed))
   const completed = computed(() => tasks.value.filter(task => !task.deletedAt && task.completed).sort((a, b) => (b.completedAt ?? '').localeCompare(a.completedAt ?? '')))
@@ -33,16 +54,28 @@ export const useTaskStore = defineStore('tasks', () => {
     const index = tasks.value.findIndex(task => task.id === id); if (index < 0) return
     const normalized = patch.title && patch.url == null ? { ...patch, url: extractFirstUrl(patch.title) } : patch
     const reminder = resolveReminderState(tasks.value[index], normalized)
-    const task = { ...tasks.value[index], ...normalized, ...reminder, updatedAt: nowIso() }; tasks.value[index] = task; await taskRepository.save(task); scheduleSync()
+    const task = { ...tasks.value[index], ...normalized, ...reminder, updatedAt: nowIso() }
+    // Only expose the new state after IndexedDB and syncQueue commit together.
+    // Seeing a completed/deleted row disappear now means the action is durable.
+    await taskRepository.save(task)
+    const currentIndex = tasks.value.findIndex(value => value.id === id)
+    if (currentIndex >= 0) tasks.value[currentIndex] = task
+    scheduleSync()
   }
   async function complete(id: string) { await update(id, { completed: true, completedAt: nowIso() }) }
   async function restore(id: string) { await update(id, { completed: false, completedAt: null }) }
   async function softDelete(id: string) {
     const task = tasks.value.find(task => task.id === id); if (!task) return
-    lastDeleted.value = { ...task }; await update(id, { deletedAt: nowIso() })
-    window.clearTimeout(undoTimer); undoTimer = window.setTimeout(() => { lastDeleted.value = null }, 5000)
+    await update(id, { deletedAt: nowIso() })
+    lastDeleted.value = { ...task }
+    scheduleUndoToast()
   }
-  async function undoDelete() { if (!lastDeleted.value) return; await update(lastDeleted.value.id, { deletedAt: null }); lastDeleted.value = null; window.clearTimeout(undoTimer) }
+  async function undoDelete() {
+    const task = lastDeleted.value
+    if (!task) return
+    clearUndoToast()
+    await update(task.id, { deletedAt: null })
+  }
 
   function positionTasks(ids: string[]) {
     const positions = new Map(ids.map((id, index) => [id, index]))

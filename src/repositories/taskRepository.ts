@@ -2,8 +2,6 @@ import { db } from '../storage/database'
 import type { SyncChange, Task } from '../types'
 import { automaticReminder, explicitReminder } from '../utils/reminder'
 
-const queue = async (value: Task) => (await db()).add('syncQueue', { entity: 'task', value, queuedAt: new Date().toISOString() } satisfies SyncChange)
-
 export function normalizeTask(value: Task | (Partial<Task> & Record<string, unknown>)): Task {
   const legacy = value as Partial<Task> & { date?: string | null; time?: string | null; reminderEnabled?: boolean; reminderAt?: string | null; reminderEventId?: string | null; reminderSentAt?: string | null }
   const dueDate = value.dueDate ?? legacy.date ?? null
@@ -30,8 +28,14 @@ export const taskRepository = {
   async get(id: string) { const task = await (await db()).get('tasks', id); return task ? normalizeTask(task) : undefined },
   async save(task: Task, shouldQueue = true) {
     const normalized = normalizeTask(task)
-    await (await db()).put('tasks', normalized)
-    if (shouldQueue) await queue(normalized)
+    const database = await db()
+    // Persist the task and its sync intent atomically. If an installed PWA is
+    // closed immediately after an action, it must never keep one without the
+    // other and later let stale cloud state resurrect the task.
+    const transaction = database.transaction(['tasks', 'syncQueue'], 'readwrite')
+    await transaction.objectStore('tasks').put(normalized)
+    if (shouldQueue) await transaction.objectStore('syncQueue').add({ entity: 'task', value: normalized, queuedAt: new Date().toISOString() } satisfies SyncChange)
+    await transaction.done
     return normalized
   },
   async saveMany(tasks: Task[], shouldQueue = true) {
