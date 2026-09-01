@@ -52,3 +52,23 @@ export function resolveReminderState(previous: ReminderFields | undefined, patch
 }
 
 export function explicitReminder(at: string, id: string = crypto.randomUUID()): TaskReminder { return { id, at, eventId: null, sentAt: null, source: 'explicit' } }
+
+export type ReminderAttentionStatus = 'sent' | 'unsent'
+
+export function getReminderAttention(task: Pick<Task, 'reminders' | 'completed' | 'deletedAt'>, now = new Date()) {
+  if (task.completed || task.deletedAt) return null
+  const currentTime = now.getTime()
+  const reached = task.reminders.flatMap(reminder => {
+    const at = Date.parse(reminder.at)
+    return Number.isFinite(at) && at <= currentTime ? [{ reminder, at }] : []
+  })
+  if (!reached.length) return null
+  return {
+    status: (reached.some(({ reminder }) => !reminder.sentAt) ? 'unsent' : 'sent') as ReminderAttentionStatus,
+    latestAt: Math.max(...reached.map(item => item.at)),
+  }
+}
+
+export function hasMissedReminder(task: Pick<Task, 'reminders' | 'completed' | 'deletedAt'>, now = new Date()) {
+  return getReminderAttention(task, now)?.status === 'unsent'
+}

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useTaskStore } from './stores/tasks'
-import { addDays, formatTaskDate, isOverdue, nextWeekRange, toDateKey, weekendRange } from './utils/date'
+import { formatTaskDate } from './utils/date'
 import { installAutoSync, syncNow } from './sync/syncService'
 import { draftRepository } from './repositories/draftRepository'
 import { taskRepository } from './repositories/taskRepository'
@@ -20,31 +20,20 @@ import { api, authExpiredEvent } from './services/api'
 import { getSettings, saveSettings } from './storage/database'
 import { requestCloseSwipeActions } from './utils/swipeCoordinator'
 import { toggleCollapsedGroup } from './utils/groupCollapse'
-import { CalendarDays, Check, ChevronDown, GripVertical, Plus, Search, Settings } from '@lucide/vue'
+import { buildHomeTaskGroups } from './utils/homeGroups'
+import { CalendarDays, Check, ChevronDown, CircleAlert, GripVertical, Plus, Search, Settings } from '@lucide/vue'
 
 const store = useTaskStore(); const screen = ref<'home'|'ai'|'calendar'|'completed'|'settings'|'search'>('home'); const sheet = ref<'add'|'quick'|'edit'|'date'|null>(null); const editing = ref<Task>(); const dateEditing = ref<Task>(); const authenticated = ref(api.hasSession()); const draftCount = ref(0); const draftToOpen = ref<string>()
 const collapsedGroups = ref(new Set<string>())
 const collapsedGroupsStorageKey = 'todo-collapsed-groups-v1'
 let uninstallSync: (() => void) | undefined
+let clockTimer: number | undefined
+const currentTime = ref(new Date())
 const handleAuthExpired = () => { authenticated.value = false; screen.value = 'home' }
-onMounted(async () => { window.addEventListener(authExpiredEvent, handleAuthExpired); try { const saved = JSON.parse(localStorage.getItem(collapsedGroupsStorageKey) ?? '[]'); if (Array.isArray(saved) && saved.every(value => typeof value === 'string')) collapsedGroups.value = new Set(saved) } catch {} await store.load(); await taskRepository.purgeExpiredTombstones(); await draftRepository.purgeExpiredTombstones(); const settings = await getSettings(); const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; if (settings.updatedAt === new Date(0).toISOString() || settings.timezone !== timezone) await saveSettings({ ...settings, timezone, updatedAt: new Date().toISOString() }, true); await store.load(); draftCount.value = (await draftRepository.list()).filter(d => d.content.trim()).length; uninstallSync = installAutoSync(store.load); if (authenticated.value) void syncNow().then(async () => { await store.load(); openTodoFromUrl() }).catch(()=>{}); else openTodoFromUrl() })
-onUnmounted(() => { uninstallSync?.(); window.removeEventListener(authExpiredEvent, handleAuthExpired) })
+onMounted(async () => { window.addEventListener(authExpiredEvent, handleAuthExpired); clockTimer = window.setInterval(() => { currentTime.value = new Date() }, 30_000); try { const saved = JSON.parse(localStorage.getItem(collapsedGroupsStorageKey) ?? '[]'); if (Array.isArray(saved) && saved.every(value => typeof value === 'string')) collapsedGroups.value = new Set(saved) } catch {} await store.load(); await taskRepository.purgeExpiredTombstones(); await draftRepository.purgeExpiredTombstones(); const settings = await getSettings(); const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; if (settings.updatedAt === new Date(0).toISOString() || settings.timezone !== timezone) await saveSettings({ ...settings, timezone, updatedAt: new Date().toISOString() }, true); await store.load(); draftCount.value = (await draftRepository.list()).filter(d => d.content.trim()).length; uninstallSync = installAutoSync(store.load); if (authenticated.value) void syncNow().then(async () => { await store.load(); openTodoFromUrl() }).catch(()=>{}); else openTodoFromUrl() })
+onUnmounted(() => { uninstallSync?.(); window.clearInterval(clockTimer); window.removeEventListener(authExpiredEvent, handleAuthExpired) })
 const filtered = computed(() => store.sorted)
-const groups = computed(() => {
-  const today = toDateKey(new Date()), tomorrow = toDateKey(addDays(new Date(),1)), weekend = weekendRange(), next = nextWeekRange()
-  const map = new Map<string, Task[]>(); const add = (label:string, task:Task) => map.set(label, [...(map.get(label) ?? []), task])
-  for (const task of filtered.value) {
-    if (task.pinned) add('置顶', task)
-    else if (isOverdue(task)) add('过期', task)
-    else if (task.dueDate === today) add('今天', task)
-    else if (task.dueDate === tomorrow) add('明天', task)
-    else if (task.dateRange?.start === weekend.start && task.dateRange.end === weekend.end) add('本周末', task)
-    else if (task.dateRange?.start === next.start && task.dateRange.end === next.end) add('下周', task)
-    else if (task.dueDate || task.dateRange) add(formatTaskDate(task), task)
-    else add('无日期', task)
-  }
-  return [...map.entries()].map(([label,tasks]) => ({ label, key: label, tasks }))
-})
+const groups = computed(() => buildHomeTaskGroups(filtered.value, currentTime.value))
 function openEdit(task: Task) { editing.value = task; sheet.value = 'edit' }
 function openTodoFromUrl() { const todoId = new URLSearchParams(location.search).get('todo'); if (!todoId) return; const task = store.tasks.find(item => item.id === todoId && !item.deletedAt); if (task) { screen.value = 'home'; openEdit(task) } history.replaceState(null, '', `${location.pathname}${location.hash}`) }
 function openDate(task: Task) { dateEditing.value = task; sheet.value = 'date' }
@@ -97,7 +86,7 @@ async function finishReorder(id: string) { if (draggingTaskId.value !== id) retu
   <SearchView v-else-if="screen === 'search'" @close="screen='home'" @edit="editFromSearch" @open-draft="openDraft" />
   <div v-else class="app-shell" @click="closeSwipeActionsFromBlank">
     <header class="topbar"><div><h1>Todo</h1><p>{{ store.active.length }} 件在路上</p></div><div class="top-actions"><button class="icon-action" aria-label="日历" @click="screen='calendar'"><CalendarDays :size="23" :stroke-width="2.1"/></button><button class="search-button" aria-label="搜索" @click="screen='search'"><Search :size="23" :stroke-width="2.1"/></button></div></header>
-    <main class="task-list"><section v-for="group in groups" :key="group.label" class="task-group" :data-task-group="group.key"><button class="task-group-header" :aria-expanded="!collapsedGroups.has(group.key)" @click.stop="toggleGroup(group.key)"><h2>{{ group.label }}</h2><ChevronDown :size="17" :class="{ collapsed: collapsedGroups.has(group.key) }"/></button><TransitionGroup v-if="!collapsedGroups.has(group.key)" name="task-reorder" tag="div" class="task-group-rows"><TaskRow v-for="task in group.tasks" :key="task.id" :task="task" :reorderable="true" :reordering="Boolean(draggingTaskId)" :is-drag-source="draggingTaskId === task.id" @edit="openEdit" @date="openDate" @complete="store.complete" @restore="store.restore" @remove="remove" @reorder-start="startReorder" @reorder-move="moveReorder" @reorder-end="finishReorder"/></TransitionGroup></section><div v-if="!groups.length" class="empty home-empty"><span>✓</span><h2>现在没有要做的事</h2><p>想到什么，随手丢进来。</p></div></main>
+    <main class="task-list"><section v-for="group in groups" :key="group.key" class="task-group" :class="{ 'attention-group': group.attention }" :data-task-group="group.key"><button class="task-group-header" :aria-expanded="!collapsedGroups.has(group.key)" @click.stop="toggleGroup(group.key)"><h2><span v-if="group.attention" class="attention-mark"><CircleAlert :size="17" :stroke-width="2.15"/></span><span>{{ group.label }}</span><small v-if="group.attention">· {{ group.tasks.length }}</small></h2><ChevronDown :size="17" :class="{ collapsed: collapsedGroups.has(group.key) }"/></button><TransitionGroup v-if="!collapsedGroups.has(group.key)" name="task-reorder" tag="div" class="task-group-rows"><TaskRow v-for="task in group.tasks" :key="task.id" :task="task" :now="currentTime" :reorderable="!group.attention" :reordering="Boolean(draggingTaskId)" :is-drag-source="draggingTaskId === task.id" @edit="openEdit" @date="openDate" @complete="store.complete" @restore="store.restore" @remove="remove" @reorder-start="startReorder" @reorder-move="moveReorder" @reorder-end="finishReorder"/></TransitionGroup></section><div v-if="!groups.length" class="empty home-empty"><span>✓</span><h2>现在没有要做的事</h2><p>想到什么，随手丢进来。</p></div></main>
     <article v-if="dragGhost" class="drag-ghost" :style="{ top: `${dragGhost.top}px`, left: `${dragGhost.left}px`, width: `${dragGhost.width}px` }"><span class="check"></span><div class="task-main"><span class="task-title">{{ dragGhost.task.title }}</span><span class="task-meta">{{ formatTaskDate(dragGhost.task) }}</span></div><GripVertical class="drag-ghost-handle" :size="19" :stroke-width="1.8"/></article>
     <nav class="bottom-nav"><button aria-label="设置" @click="screen='settings'"><span><Settings :size="22" :stroke-width="1.8"/></span>设置</button><button class="add-button" aria-label="添加任务" @click="sheet='add'"><Plus :size="31" :stroke-width="2.2"/></button><button aria-label="已完成任务" @click="screen='completed'"><span><Check :size="23" :stroke-width="2"/></span>已完成</button></nav>
     <div v-if="store.lastDeleted" class="toast">已删除 <button @click="store.undoDelete">撤销</button></div>

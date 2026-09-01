@@ -7,11 +7,16 @@ export function normalizeTask(value: Task | (Partial<Task> & Record<string, unkn
   const dueDate = value.dueDate ?? legacy.date ?? null
   const startTime = value.startTime ?? legacy.time ?? null
   const auto = automaticReminder(dueDate, startTime).reminders ?? []
-  const reminders = Array.isArray(value.reminders) ? value.reminders : legacy.reminderEnabled && legacy.reminderAt ? [legacy.reminderMode === 'auto' ? { ...(auto[0] ?? explicitReminder(legacy.reminderAt, 'legacy')), eventId: legacy.reminderEventId ?? null, sentAt: legacy.reminderSentAt ?? null } : { ...explicitReminder(legacy.reminderAt, 'legacy'), eventId: legacy.reminderEventId ?? null, sentAt: legacy.reminderSentAt ?? null }] : []
+  // Pinia makes nested task data reactive. IndexedDB cannot structured-clone
+  // Proxy arrays/objects, so the repository boundary must always own a plain
+  // serializable copy rather than retaining reactive references.
+  const reminders = Array.isArray(value.reminders) ? value.reminders.map(reminder => ({ ...reminder })) : legacy.reminderEnabled && legacy.reminderAt ? [legacy.reminderMode === 'auto' ? { ...(auto[0] ?? explicitReminder(legacy.reminderAt, 'legacy')), eventId: legacy.reminderEventId ?? null, sentAt: legacy.reminderSentAt ?? null } : { ...explicitReminder(legacy.reminderAt, 'legacy'), eventId: legacy.reminderEventId ?? null, sentAt: legacy.reminderSentAt ?? null }] : []
+  const dateRange = value.dateRange ? { ...value.dateRange } : null
   const { reminderEnabled: _enabled, reminderAt: _at, reminderEventId: _event, reminderSentAt: _sent, ...rest } = value as typeof legacy
   return {
     ...rest,
     dueDate,
+    dateRange,
     startTime,
     reminderMode: value.reminderMode ?? (reminders.length ? (reminders[0]?.source === 'auto' ? 'auto' : 'explicit') : 'off'),
     reminders,

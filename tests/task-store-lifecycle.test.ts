@@ -5,7 +5,7 @@ import { resetDatabaseForTests } from '../src/storage/database'
 import { useTaskStore } from '../src/stores/tasks'
 import type { Task } from '../src/types'
 
-const task = (): Task => ({
+const task = (overrides: Partial<Task> = {}): Task => ({
   id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   title: '生命周期验收',
   dueDate: null,
@@ -22,7 +22,8 @@ const task = (): Task => ({
   updatedAt: '2026-08-30T08:00:00.000Z',
   deletedAt: null,
   recurrence: null,
-  source: 'manual'
+  source: 'manual',
+  ...overrides
 })
 
 async function loadedStore() {
@@ -87,5 +88,32 @@ describe('任务操作持久化与撤销提示', () => {
     release()
     await operation
     expect(store.active).toHaveLength(1)
+  })
+
+  it('带显式提醒的任务可以完成并持久化', async () => {
+    await taskRepository.save(task({
+      reminderMode: 'explicit',
+      reminders: [{ id: 'reminder-1', at: '2026-09-01T03:00:00.000Z', eventId: 'event-1', sentAt: null, source: 'explicit' }]
+    }), false)
+    const store = useTaskStore()
+    await store.load()
+
+    await expect(store.complete(task().id)).resolves.toBeUndefined()
+    expect((await taskRepository.get(task().id))?.completed).toBe(true)
+  })
+
+  it('带多条提醒的任务可以删除并保存 tombstone', async () => {
+    await taskRepository.save(task({
+      reminderMode: 'explicit',
+      reminders: [
+        { id: 'reminder-1', at: '2026-09-01T03:00:00.000Z', eventId: 'event-1', sentAt: null, source: 'explicit' },
+        { id: 'reminder-2', at: '2026-09-02T03:00:00.000Z', eventId: null, sentAt: null, source: 'explicit' }
+      ]
+    }), false)
+    const store = useTaskStore()
+    await store.load()
+
+    await expect(store.softDelete(task().id)).resolves.toBeUndefined()
+    expect((await taskRepository.get(task().id))?.deletedAt).toBeTruthy()
   })
 })

@@ -59,9 +59,35 @@ export function parseNaturalTask(input: string, now = new Date()): LocalParseRes
 }
 
 export const taskDateKey = (task: { dueDate?: string | null; dateRange?: DateRange | null }) => task.dueDate ?? task.dateRange?.start ?? null
-export const isOverdue = (task: { dueDate?: string | null; dateRange?: DateRange | null; completed?: boolean }, now = new Date()) => {
+function localDateParts(key: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key)
+  if (!match) return null
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3])
+  const value = new Date(year, month - 1, day)
+  return value.getFullYear() === year && value.getMonth() === month - 1 && value.getDate() === day
+    ? { year, month, day }
+    : null
+}
+
+/** The local instant after which an unfinished task should be treated as overdue. */
+export function taskOverdueAt(task: { dueDate?: string | null; dateRange?: DateRange | null; endTime?: string | null }) {
   const key = task.dueDate ?? task.dateRange?.end
-  return Boolean(key && key < toDateKey(now) && !task.completed)
+  if (!key) return null
+  const parts = localDateParts(key)
+  if (!parts) return null
+  if (task.dueDate && task.endTime) {
+    const time = /^(\d{2}):(\d{2})$/.exec(task.endTime)
+    if (time) {
+      const hour = Number(time[1]), minute = Number(time[2])
+      if (hour < 24 && minute < 60) return new Date(parts.year, parts.month - 1, parts.day, hour, minute).getTime()
+    }
+  }
+  return new Date(parts.year, parts.month - 1, parts.day + 1).getTime()
+}
+
+export const isOverdue = (task: { dueDate?: string | null; dateRange?: DateRange | null; endTime?: string | null; completed?: boolean; deletedAt?: string | null }, now = new Date()) => {
+  const overdueAt = taskOverdueAt(task)
+  return Boolean(overdueAt != null && overdueAt <= now.getTime() && !task.completed && !task.deletedAt)
 }
 
 export function formatTaskDate(task: { dueDate?: string | null; dateRange?: DateRange | null }, now = new Date()) {
