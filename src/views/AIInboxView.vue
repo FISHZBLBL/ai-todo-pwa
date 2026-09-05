@@ -7,12 +7,14 @@ import { parseLocalInbox } from '../ai/localParser'
 import { useSpeech } from '../composables/useSpeech'
 import type { Draft, ParsedTask } from '../types'
 import { hasIncompleteReminder } from '../ai/reminderPreview'
+import { getSettings } from '../storage/database'
 
 const props = defineProps<{ draftId?: string }>()
 const emit = defineEmits<{ close: []; confirm: [ParsedTask[], string | undefined] }>()
 const content = ref(''), draft = ref<Draft>(), parsing = ref(false), error = ref(''), preview = ref<ParsedTask[]>([])
+const dailySummaryTime = ref('08:00')
 let timer: number | undefined
-onMounted(async () => { draft.value = props.draftId ? await draftRepository.get(props.draftId) : await draftRepository.latest(); if (draft.value) content.value = draft.value.content })
+onMounted(async () => { const settings = await getSettings(); dailySummaryTime.value = settings.dailySummaryTime; draft.value = props.draftId ? await draftRepository.get(props.draftId) : await draftRepository.latest(); if (draft.value) content.value = draft.value.content })
 watch(content, () => { window.clearTimeout(timer); timer = window.setTimeout(saveDraft, 300) })
 async function saveDraft(status: Draft['aiParseStatus'] = draft.value?.aiParseStatus ?? 'idle', lastError: string | null = null) {
   if (!content.value.trim() && !draft.value) return
@@ -27,7 +29,7 @@ async function parse() {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(new DOMException('AI 请求超时', 'TimeoutError')), 20000)
   try {
-    const result = await api.parse(content.value, controller.signal); preview.value = result.tasks.map(item => ({ ...item, selected: true })); await saveDraft('parsed')
+    const result = await api.parse(content.value, dailySummaryTime.value, controller.signal); preview.value = result.tasks.map(item => ({ ...item, reminders: item.reminders?.map(reminder => reminder.recurrence && !reminder.time ? { ...reminder, time: dailySummaryTime.value, period: null } : reminder), selected: true })); await saveDraft('parsed')
   } catch (reason) { error.value = controller.signal.aborted ? 'AI 请求超时，请检查网络后重试' : reason instanceof Error ? reason.message : 'AI 解析失败'; await saveDraft('failed', error.value) }
   finally { window.clearTimeout(timeout); parsing.value = false }
 }
@@ -40,7 +42,8 @@ function setPreviewDate(task: ParsedTask, event: Event) { task.dueDate = (event.
 function setReminderDate(reminder: NonNullable<ParsedTask['reminders']>[number], event: Event) { reminder.date = (event.target as HTMLInputElement).value || null }
 function removeReminder(task: ParsedTask, index: number) { task.reminders?.splice(index, 1) }
 const reminderPeriodLabel: Record<NonNullable<ParsedTask['reminders']>[number]['period'] & string, string> = { morning: '上午', noon: '中午', afternoon: '下午', evening: '晚上', night: '夜间' }
-const canConfirm = computed(() => preview.value.some(task => task.selected) && preview.value.filter(task => task.selected).every(task => task.title.trim() && (!task.dateRange || task.dateRange.start <= task.dateRange.end) && (!task.startTime || Boolean(task.dueDate)) && !hasIncompleteReminder(task)))
+function validRecurrence(task: ParsedTask) { return (task.reminders ?? []).every(({ date, recurrence }) => !recurrence || (recurrence.interval >= 1 && (recurrence.end !== 'count' || Boolean(recurrence.count && recurrence.count >= 1)) && (recurrence.end !== 'date' || Boolean(recurrence.until && date && recurrence.until >= date)))) }
+const canConfirm = computed(() => preview.value.some(task => task.selected) && preview.value.filter(task => task.selected).every(task => task.title.trim() && (!task.dateRange || task.dateRange.start <= task.dateRange.end) && (!task.startTime || Boolean(task.dueDate)) && !hasIncompleteReminder(task) && validRecurrence(task)))
 const speech = useSpeech(text => { content.value += `${content.value && !content.value.endsWith('\n') ? '，' : ''}${text}` })
 </script>
 <template><main class="full-view ai-view">
@@ -55,7 +58,7 @@ const speech = useSpeech(text => { content.value += `${content.value && !content
     <div class="preview-heading"><h2>识别到 {{ preview.length }} 个任务</h2><p>确认后才会写入任务库</p></div>
     <article v-for="(task, index) in preview" :key="index" class="preview-item" :class="{ excluded: !task.selected }">
       <button class="check checked" :class="{ off: !task.selected }" @click="task.selected = !task.selected">✓</button>
-      <div><input v-model="task.title" class="preview-title" /><div class="preview-fields"><label class="preview-date-field"><span>日期</span><input :value="task.dueDate ?? ''" type="date" @change="setPreviewDate(task, $event)"/></label><input v-if="task.dueDate" v-model="task.startTime" type="time" aria-label="开始时间"/><template v-if="task.dateRange"><input v-model="task.dateRange.start" type="date" aria-label="范围开始"/><span>–</span><input v-model="task.dateRange.end" type="date" aria-label="范围结束"/></template></div><section v-for="(reminder, reminderIndex) in task.reminders" :key="reminderIndex" class="preview-reminder" :class="{ incomplete: !reminder.date || !reminder.time }"><div class="reminder-heading"><strong>🔔 提醒</strong><span v-if="!reminder.date || !reminder.time">还需补全具体时间</span></div><div class="preview-fields"><label><span>日期</span><input :value="reminder.date ?? ''" type="date" @change="setReminderDate(reminder, $event)"/></label><label><span>时间</span><input v-model="reminder.time" type="time" aria-label="提醒时间"/></label><span v-if="reminder.period && !reminder.time" class="period-hint">{{ reminderPeriodLabel[reminder.period] }}</span></div><button type="button" class="remove-reminder" @click="removeReminder(task, reminderIndex)">不设置此提醒</button></section></div>
+      <div><input v-model="task.title" class="preview-title" /><div class="preview-fields"><label class="preview-date-field"><span>日期</span><input :value="task.dueDate ?? ''" type="date" @change="setPreviewDate(task, $event)"/></label><input v-if="task.dueDate" v-model="task.startTime" type="time" aria-label="开始时间"/><template v-if="task.dateRange"><input v-model="task.dateRange.start" type="date" aria-label="范围开始"/><span>–</span><input v-model="task.dateRange.end" type="date" aria-label="范围结束"/></template></div><section v-for="(reminder, reminderIndex) in task.reminders" :key="reminderIndex" class="preview-reminder" :class="{ incomplete: !reminder.date || (!reminder.time && !reminder.recurrence) }"><div class="reminder-heading"><strong>🔔 提醒</strong><span v-if="!reminder.date || (!reminder.time && !reminder.recurrence)">还需补全具体时间</span><span v-else-if="reminder.recurrence">重复提醒</span></div><div class="preview-fields"><label><span>首次日期</span><input :value="reminder.date ?? ''" type="date" @change="setReminderDate(reminder, $event)"/></label><label><span>时间</span><input v-model="reminder.time" type="time" aria-label="提醒时间"/></label><span v-if="reminder.period && !reminder.time" class="period-hint">{{ reminderPeriodLabel[reminder.period] }}</span></div><div v-if="reminder.recurrence" class="preview-fields recurrence-preview"><label><span>每隔</span><input v-model.number="reminder.recurrence.interval" type="number" min="1" max="365"/></label><select v-model="reminder.recurrence.unit" aria-label="重复单位"><option value="day">天</option><option value="week">周</option></select><select v-model="reminder.recurrence.end" aria-label="结束方式"><option value="never">持续重复</option><option value="count">按次数</option><option value="date">到指定日期</option></select><label v-if="reminder.recurrence.end==='count'"><span>共</span><input v-model.number="reminder.recurrence.count" type="number" min="1" max="365"/></label><label v-if="reminder.recurrence.end==='date'"><span>结束</span><input v-model="reminder.recurrence.until" type="date"/></label><span v-if="reminder.recurrence.countdown">每次显示剩余时间</span></div><button type="button" class="remove-reminder" @click="removeReminder(task, reminderIndex)">不设置此提醒</button></section></div>
     </article>
     <div class="sticky-actions"><button @click="preview = []">返回修改</button><button class="primary" :disabled="!canConfirm" @click="confirm">全部添加</button></div>
   </section>

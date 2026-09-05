@@ -6,7 +6,7 @@ import { AI_SYSTEM_PROMPT } from './systemPrompt.js'
 import { cloudStore } from '../storage.js'
 import { decryptDeepseekApiKey } from '../secrets.js'
 
-export interface ParseContext { content: string; currentLocalDateTime: string; timezone: string; locale: string }
+export interface ParseContext { content: string; currentLocalDateTime: string; timezone: string; locale: string; dailySummaryTime?: string }
 export interface AIProvider { parse(context: ParseContext, options?: { jsonMode?: boolean }): Promise<AIResult> }
 export class AIEmptyResponseError extends Error {}
 export class AIJsonSyntaxError extends Error {}

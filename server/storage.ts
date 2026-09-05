@@ -7,20 +7,23 @@ import { CosObjectStore } from './cos.js'
 import type { EncryptedSecret } from './secrets.js'
 
 interface StoredEntity { id: string; updatedAt: string; deletedAt?: string | null }
-interface StoredReminder { id: string; at: string; eventId?: string | null; sentAt?: string | null; source?: 'auto'|'explicit' }
+interface StoredRecurrence { unit: 'day'|'week'; interval: number; end: 'never'|'count'|'date'; count: number | null; until: string | null; occurrence: number; timezone: string; countdown: boolean }
+interface StoredReminder { id: string; at: string; eventId?: string | null; sentAt?: string | null; source?: 'auto'|'explicit'; recurrence?: StoredRecurrence | null }
 interface StoredTask extends StoredEntity { title?: string; dueDate?: string | null; dateRange?: { start: string; end: string } | null; startTime?: string | null; completed?: boolean; reminderMode?: 'auto' | 'explicit' | 'off'; reminders?: StoredReminder[]; reminderEnabled?: boolean; reminderAt?: string | null; reminderEventId?: string | null; reminderSentAt?: string | null }
 interface PushRecord { endpoint: string; keys?: { auth?: string; p256dh?: string }; appUrl?: string }
 interface StoredSettings extends StoredEntity { dailySummaryTime: string; timezone: string; schemaVersion: number }
 export interface DailySummarySchedule { eventId: string; scheduledFor: string; dailySummaryTime: string; timezone: string }
-interface CloudData { tasks: StoredTask[]; drafts: StoredEntity[]; settings: StoredSettings | null; subscriptions: PushRecord[]; dailySummarySentDates: string[]; dailySummarySchedule: DailySummarySchedule | null; deepseekSecret: EncryptedSecret | null }
+interface StoredProfile extends StoredEntity { title: string | null; content: string; createdAt: string }
+interface CloudData { tasks: StoredTask[]; drafts: StoredEntity[]; profiles: StoredProfile[]; settings: StoredSettings | null; subscriptions: PushRecord[]; dailySummarySentDates: string[]; dailySummarySchedule: DailySummarySchedule | null; deepseekSecret: EncryptedSecret | null }
 export interface ReminderTransition { todoId: string; oldEventIds: string[] }
 const remindersOf = (task?: StoredTask) => task?.reminders ?? (task?.reminderEnabled && task.reminderAt ? [{ id: 'legacy', at: task.reminderAt, eventId: task.reminderEventId ?? null, sentAt: task.reminderSentAt ?? null, source: task.reminderMode === 'auto' ? 'auto' as const : 'explicit' as const }] : [])
-const empty = (): CloudData => ({ tasks: [], drafts: [], settings: null, subscriptions: [], dailySummarySentDates: [], dailySummarySchedule: null, deepseekSecret: null })
+const empty = (): CloudData => ({ tasks: [], drafts: [], profiles: [], settings: null, subscriptions: [], dailySummarySentDates: [], dailySummarySchedule: null, deepseekSecret: null })
 let lock = Promise.resolve()
 
 const cloudDataSchema = z.object({
   tasks: z.array(z.object({ id: z.string(), updatedAt: z.string(), deletedAt: z.string().nullable().optional() }).passthrough()).default([]),
   drafts: z.array(z.object({ id: z.string(), updatedAt: z.string(), deletedAt: z.string().nullable().optional() }).passthrough()).default([]),
+  profiles: z.array(z.object({ id: z.string(), title: z.string().nullable(), content: z.string(), createdAt: z.string(), updatedAt: z.string(), deletedAt: z.string().nullable().optional() })).default([]),
   settings: z.object({ id: z.string(), updatedAt: z.string(), dailySummaryTime: z.string(), timezone: z.string(), schemaVersion: z.number() }).passthrough().nullable().default(null),
   subscriptions: z.array(z.object({ endpoint: z.string(), keys: z.object({ auth: z.string().optional(), p256dh: z.string().optional() }).optional(), appUrl: z.string().optional() })).default([]),
   dailySummarySentDates: z.array(z.string()).default([]),
@@ -227,7 +230,7 @@ const mutate = <T>(fn: (data: CloudData) => T | Promise<T>) => config.STORAGE_AD
 
 export const cloudStore = {
   read,
-  async merge(changes: Array<{ entity: 'task'|'draft'|'settings'; value: StoredEntity }>) {
+  async merge(changes: Array<{ entity: 'task'|'draft'|'profile'|'settings'; value: StoredEntity }>) {
     return mutate(data => {
       const transitions = new Map<string, Set<string>>()
       const touch = (todoId: string, oldEventId?: string | null) => {
@@ -237,7 +240,7 @@ export const cloudStore = {
       }
       for (const change of changes) {
         if (change.entity === 'settings') { if (!data.settings || change.value.updatedAt > data.settings.updatedAt) data.settings = change.value as StoredSettings; continue }
-        const collection = change.entity === 'task' ? data.tasks : data.drafts
+        const collection = change.entity === 'task' ? data.tasks : change.entity === 'draft' ? data.drafts : data.profiles
         const index = collection.findIndex(item => item.id === change.value.id)
         if (index >= 0 && change.value.updatedAt <= collection[index].updatedAt) {
           if (change.entity === 'task') touch(change.value.id)
@@ -258,9 +261,14 @@ export const cloudStore = {
           if (index < 0) data.tasks.push(next); else data.tasks[index] = next
           continue
         }
-        if (index < 0) data.drafts.push(change.value); else data.drafts[index] = change.value
+        if (change.entity === 'draft') {
+          if (index < 0) data.drafts.push(change.value); else data.drafts[index] = change.value
+        } else {
+          const profile = change.value as StoredProfile
+          if (index < 0) data.profiles.push(profile); else data.profiles[index] = profile
+        }
       }
-      return { tasks: data.tasks, drafts: data.drafts, settings: data.settings, reminderTransitions: [...transitions].map(([todoId, eventIds]) => ({ todoId, oldEventIds: [...eventIds] })) satisfies ReminderTransition[] }
+      return { tasks: data.tasks, drafts: data.drafts, profiles: data.profiles, settings: data.settings, reminderTransitions: [...transitions].map(([todoId, eventIds]) => ({ todoId, oldEventIds: [...eventIds] })) satisfies ReminderTransition[] }
     })
   },
   async addSubscription(subscription: PushRecord) { return mutate(data => { const index = data.subscriptions.findIndex(item => item.endpoint === subscription.endpoint); if (index < 0) data.subscriptions.push(subscription); else data.subscriptions[index] = subscription }) },
@@ -269,11 +277,37 @@ export const cloudStore = {
   async getTask(todoId: string) { return (await read()).tasks.find(task => task.id === todoId) ?? null },
   async setReminderEvent(todoId: string, reminderIdOrAt: string, atOrEventId: string, eventId?: string) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task) return false; if (!eventId) { if (!task.reminderEnabled || task.reminderAt !== reminderIdOrAt || task.completed || task.deletedAt || task.reminderEventId) return false; task.reminderEventId = atOrEventId; task.reminderSentAt = null; return true } const reminder = remindersOf(task).find(item => item.id === reminderIdOrAt); if (!reminder || reminder.at !== atOrEventId || task.completed || task.deletedAt || reminder.eventId) return false; reminder.eventId = eventId; reminder.sentAt = null; task.reminders = remindersOf(task); return true }) },
   async markReminderSent(todoId: string, reminderIdOrEventId: string, eventIdOrSentAt?: string, sentAt = new Date().toISOString()) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task) return false; if (!eventIdOrSentAt) { if (!task.reminderEnabled || task.reminderEventId !== reminderIdOrEventId || task.reminderSentAt) return false; task.reminderSentAt = sentAt; return true } const reminder = remindersOf(task).find(item => item.id === reminderIdOrEventId); if (!reminder || reminder.eventId !== eventIdOrSentAt || reminder.sentAt) return false; reminder.sentAt = sentAt; task.reminders = remindersOf(task); return true }) },
+  async advanceReminderOccurrence(todoId: string, reminderId: string, eventId: string, next: { at: string; recurrence: StoredRecurrence } | null, nextEventId: string | null, sentAt = new Date().toISOString()) {
+    return mutate(data => {
+      const task = data.tasks.find(item => item.id === todoId)
+      if (!task || task.completed || task.deletedAt) return false
+      const reminders = remindersOf(task)
+      const reminder = reminders.find(item => item.id === reminderId)
+      if (!reminder || reminder.eventId !== eventId || reminder.sentAt || !reminder.recurrence) return false
+      if (next) {
+        if (!nextEventId) return false
+        reminder.at = next.at
+        reminder.recurrence = next.recurrence
+        reminder.eventId = nextEventId
+        reminder.sentAt = null
+      } else {
+        reminder.sentAt = sentAt
+        const otherPending = reminders.some(item => item.id !== reminderId && !item.sentAt)
+        if (!task.dueDate && !task.dateRange && !otherPending) {
+          task.completed = true
+          ;(task as StoredTask & { completedAt?: string | null }).completedAt = sentAt
+        }
+      }
+      task.updatedAt = sentAt
+      task.reminders = reminders
+      return true
+    })
+  },
   async getDailySummaryScheduleState() { const data = await read(); return { settings: data.settings ?? { dailySummaryTime: '08:00', timezone: config.APP_TIMEZONE }, schedule: data.dailySummarySchedule } },
   async setDailySummarySchedule(schedule: DailySummarySchedule | null) { return mutate(data => { data.dailySummarySchedule = schedule }) },
   async claimDailySummary(date: string) { return mutate(data => { data.dailySummarySentDates = data.dailySummarySentDates.filter(value => value >= date); if (data.dailySummarySentDates.includes(date)) return false; data.dailySummarySentDates.push(date); return true }) },
   async releaseDailySummary(date: string) { return mutate(data => { data.dailySummarySentDates = data.dailySummarySentDates.filter(value => value !== date) }) },
-  async purgeExpiredTombstones(now = new Date()) { const cutoff = now.getTime() - 30 * 86400000; return mutate(data => { data.tasks = data.tasks.filter(task => !task.deletedAt || Date.parse(task.deletedAt) >= cutoff); data.drafts = data.drafts.filter(draft => !draft.deletedAt || Date.parse(draft.deletedAt) >= cutoff) }) },
+  async purgeExpiredTombstones(now = new Date()) { const cutoff = now.getTime() - 30 * 86400000; return mutate(data => { data.tasks = data.tasks.filter(task => !task.deletedAt || Date.parse(task.deletedAt) >= cutoff); data.drafts = data.drafts.filter(draft => !draft.deletedAt || Date.parse(draft.deletedAt) >= cutoff); data.profiles = data.profiles.filter(profile => !profile.deletedAt || Date.parse(profile.deletedAt) >= cutoff) }) },
   async getDeepseekSecret() { return (await read()).deepseekSecret },
   async saveDeepseekSecret(secret: EncryptedSecret) { return mutate(data => { data.deepseekSecret = secret }) },
   async deleteDeepseekSecret() { return mutate(data => { data.deepseekSecret = null }) }

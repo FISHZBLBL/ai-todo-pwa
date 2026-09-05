@@ -2,11 +2,27 @@ import { z } from 'zod'
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 const clockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+export const parsedRecurrenceSchema = z.object({
+  unit: z.enum(['day', 'week']),
+  interval: z.number().int().min(1).max(365),
+  end: z.enum(['never', 'count', 'date']),
+  count: z.number().int().min(1).max(365).nullable().default(null),
+  until: isoDate.nullable().default(null),
+  countdown: z.boolean().default(false)
+}).superRefine((value, context) => {
+  if (value.end === 'count' && value.count == null) context.addIssue({ code: 'custom', message: '按次数结束必须提供 count', path: ['count'] })
+  if (value.end === 'date' && value.until == null) context.addIssue({ code: 'custom', message: '按日期结束必须提供 until', path: ['until'] })
+})
 export const parsedReminderSchema = z.object({
   requested: z.literal(true),
   date: isoDate.nullable().default(null),
   time: clockTime.nullable().default(null),
-  period: z.enum(['morning', 'noon', 'afternoon', 'evening', 'night']).nullable().default(null)
+  period: z.enum(['morning', 'noon', 'afternoon', 'evening', 'night']).nullable().default(null),
+  recurrence: parsedRecurrenceSchema.nullable().default(null)
+}).superRefine((value, context) => {
+  if (value.date && value.recurrence?.end === 'date' && value.recurrence.until && value.recurrence.until < value.date) {
+    context.addIssue({ code: 'custom', message: '结束日期不能早于首次提醒日期', path: ['recurrence', 'until'] })
+  }
 })
 
 export const parsedTaskSchema = z.object({

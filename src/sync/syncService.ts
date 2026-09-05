@@ -1,8 +1,9 @@
 import { db, getSettings, saveSettings } from '../storage/database'
 import { draftRepository } from '../repositories/draftRepository'
+import { profileRepository } from '../repositories/profileRepository'
 import { taskRepository } from '../repositories/taskRepository'
 import { api } from '../services/api'
-import type { Draft, Settings, Task } from '../types'
+import type { Draft, ProfileEntry, Settings, Task } from '../types'
 
 let syncing = false
 export async function syncNow() {
@@ -28,6 +29,10 @@ export async function syncNow() {
     for (const draft of response.drafts as Draft[]) {
       const local = await draftRepository.get(draft.id)
       if (!local || draft.updatedAt > local.updatedAt) await draftRepository.save(draft, false)
+    }
+    for (const profile of (response.profiles ?? []) as ProfileEntry[]) {
+      const local = await profileRepository.get(profile.id)
+      if (!local || profile.updatedAt > local.updatedAt) await profileRepository.save(profile, false)
     }
     if (response.settings) {
       const local = await getSettings()

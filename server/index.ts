@@ -24,7 +24,8 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 const clockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 const timestamp = z.string().datetime({ offset: true })
 const reminderMode = z.enum(['auto', 'explicit', 'off'])
-const reminderItem = z.object({ id: z.string().min(1), at: timestamp, eventId: z.string().nullable().default(null), sentAt: timestamp.nullable().default(null), source: z.enum(['auto', 'explicit']) })
+const reminderRecurrence = z.object({ unit: z.enum(['day', 'week']), interval: z.number().int().min(1).max(365), end: z.enum(['never', 'count', 'date']), count: z.number().int().min(1).max(365).nullable(), until: isoDate.nullable(), occurrence: z.number().int().min(1), timezone: z.string().min(1).max(100), countdown: z.boolean() })
+const reminderItem = z.object({ id: z.string().min(1), at: timestamp, eventId: z.string().nullable().default(null), sentAt: timestamp.nullable().default(null), source: z.enum(['auto', 'explicit']), recurrence: reminderRecurrence.nullable().optional() })
 function reminderAtFromStartTime(dueDate: unknown, startTime: unknown) {
   if (typeof dueDate !== 'string' || typeof startTime !== 'string') return null
   const value = new Date(`${dueDate}T${startTime}:00`)
@@ -52,10 +53,12 @@ const taskValue = z.preprocess(value => {
   recurrence: z.null().optional(), source: z.enum(['manual', 'ai'])
 }))
 const draftValue = z.object({ id: z.string().uuid(), content: z.string().max(10_000), createdAt: timestamp, updatedAt: timestamp, aiParseStatus: z.enum(['idle', 'parsing', 'failed', 'parsed']), lastError: z.string().nullable().optional(), deletedAt: timestamp.nullable().optional() })
+const profileValue = z.object({ id: z.string().uuid(), title: z.string().min(1).max(240).nullable(), content: z.string().min(1).max(50_000), createdAt: timestamp, updatedAt: timestamp, deletedAt: timestamp.nullable().optional() })
 const settingsValue = z.object({ id: z.literal('settings'), dailySummaryTime: clockTime, timezone: z.string().min(1).max(100), schemaVersion: z.number().int().positive(), updatedAt: timestamp, lastSyncAt: timestamp.nullable().optional(), notificationPermission: z.enum(['default', 'denied', 'granted', 'unsupported']).optional() })
 const syncChange = z.discriminatedUnion('entity', [
   z.object({ entity: z.literal('task'), value: taskValue }),
   z.object({ entity: z.literal('draft'), value: draftValue }),
+  z.object({ entity: z.literal('profile'), value: profileValue }),
   z.object({ entity: z.literal('settings'), value: settingsValue })
 ])
 app.use('/api', normalLimit)
@@ -64,7 +67,7 @@ app.get('/api/health', requireAuth, async (_req, res) => { const secret = await 
 app.get('/api/ai-settings/deepseek', requireAuth, async (_req, res) => { const secret = await cloudStore.getDeepseekSecret(); res.json({ deepseek: secret ? { configured: true, maskedKey: maskedDeepseekKey(secret), updatedAt: secret.updatedAt } : { configured: Boolean(config.AI_API_KEY), maskedKey: config.AI_API_KEY ? '服务器环境变量' : null, updatedAt: null } }) })
 app.put('/api/ai-settings/deepseek', requireAuth, aiLimit, async (req, res) => { try { const apiKey = validateDeepseekApiKey(req.body?.apiKey); await verifyDeepseekApiKey(apiKey); const existing = await cloudStore.getDeepseekSecret(); const secret = encryptDeepseekApiKey(apiKey, existing?.createdAt); await cloudStore.saveDeepseekSecret(secret); res.json({ deepseek: { configured: true, maskedKey: maskedDeepseekKey(secret), updatedAt: secret.updatedAt } }) } catch (error) { res.status(Number((error as any)?.status) || 400).json({ error: error instanceof Error ? error.message : '保存 DeepSeek API Key 失败' }) } })
 app.delete('/api/ai-settings/deepseek', requireAuth, async (_req, res) => { await cloudStore.deleteDeepseekSecret(); res.json({ deepseek: { configured: Boolean(config.AI_API_KEY), maskedKey: config.AI_API_KEY ? '服务器环境变量' : null, updatedAt: null } }) })
-app.post('/api/ai/parse', requireAuth, aiLimit, async (req, res) => { const input = z.object({ content: z.string().min(1).max(10_000), currentLocalDateTime: z.string(), timezone: z.string().min(1), locale: z.string().min(1) }).safeParse(req.body); if (!input.success) return res.status(400).json({ error: '输入格式无效' }); try { res.json(await parseWithRetry(input.data)) } catch (error) { res.status(502).json({ error: error instanceof Error ? error.message : 'AI 解析失败' }) } })
+app.post('/api/ai/parse', requireAuth, aiLimit, async (req, res) => { const input = z.object({ content: z.string().min(1).max(10_000), currentLocalDateTime: z.string(), timezone: z.string().min(1), locale: z.string().min(1), dailySummaryTime: clockTime.default('08:00') }).safeParse(req.body); if (!input.success) return res.status(400).json({ error: '输入格式无效' }); try { res.json(await parseWithRetry(input.data)) } catch (error) { res.status(502).json({ error: error instanceof Error ? error.message : 'AI 解析失败' }) } })
 app.post('/api/sync', requireAuth, async (req, res) => {
   const input = z.object({ changes: z.array(syncChange).max(1000) }).safeParse(req.body)
   if (!input.success) return res.status(400).json({ error: '同步数据无效' })

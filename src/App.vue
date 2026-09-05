@@ -5,6 +5,7 @@ import { formatTaskDate } from './utils/date'
 import { installAutoSync, syncNow } from './sync/syncService'
 import { draftRepository } from './repositories/draftRepository'
 import { taskRepository } from './repositories/taskRepository'
+import { profileRepository } from './repositories/profileRepository'
 import type { ParsedTask, Task } from './types'
 import TaskRow from './components/TaskRow.vue'
 import BottomSheet from './components/BottomSheet.vue'
@@ -15,22 +16,23 @@ import CalendarView from './views/CalendarView.vue'
 import CompletedView from './views/CompletedView.vue'
 import SettingsView from './views/SettingsView.vue'
 import LoginView from './views/LoginView.vue'
-import SearchView from './views/SearchView.vue'
+import ProfileView from './views/ProfileView.vue'
 import { api, authExpiredEvent } from './services/api'
 import { getSettings, saveSettings } from './storage/database'
 import { requestCloseSwipeActions } from './utils/swipeCoordinator'
 import { toggleCollapsedGroup } from './utils/groupCollapse'
 import { buildHomeTaskGroups } from './utils/homeGroups'
-import { CalendarDays, Check, ChevronDown, CircleAlert, GripVertical, Plus, Search, Settings } from '@lucide/vue'
+import { CalendarDays, ChevronDown, CircleAlert, Files, GripVertical, Plus, Settings } from '@lucide/vue'
+import { useProfileStore } from './stores/profiles'
 
-const store = useTaskStore(); const screen = ref<'home'|'ai'|'calendar'|'completed'|'settings'|'search'>('home'); const sheet = ref<'add'|'quick'|'edit'|'date'|null>(null); const editing = ref<Task>(); const dateEditing = ref<Task>(); const authenticated = ref(api.hasSession()); const draftCount = ref(0); const draftToOpen = ref<string>()
+const store = useTaskStore(); const profiles = useProfileStore(); const screen = ref<'home'|'ai'|'calendar'|'completed'|'settings'|'profile'>('home'); const sheet = ref<'add'|'quick'|'edit'|'date'|null>(null); const editing = ref<Task>(); const dateEditing = ref<Task>(); const authenticated = ref(api.hasSession()); const draftCount = ref(0); const draftToOpen = ref<string>()
 const collapsedGroups = ref(new Set<string>())
 const collapsedGroupsStorageKey = 'todo-collapsed-groups-v1'
 let uninstallSync: (() => void) | undefined
 let clockTimer: number | undefined
 const currentTime = ref(new Date())
 const handleAuthExpired = () => { authenticated.value = false; screen.value = 'home' }
-onMounted(async () => { window.addEventListener(authExpiredEvent, handleAuthExpired); clockTimer = window.setInterval(() => { currentTime.value = new Date() }, 30_000); try { const saved = JSON.parse(localStorage.getItem(collapsedGroupsStorageKey) ?? '[]'); if (Array.isArray(saved) && saved.every(value => typeof value === 'string')) collapsedGroups.value = new Set(saved) } catch {} await store.load(); await taskRepository.purgeExpiredTombstones(); await draftRepository.purgeExpiredTombstones(); const settings = await getSettings(); const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; if (settings.updatedAt === new Date(0).toISOString() || settings.timezone !== timezone) await saveSettings({ ...settings, timezone, updatedAt: new Date().toISOString() }, true); await store.load(); draftCount.value = (await draftRepository.list()).filter(d => d.content.trim()).length; uninstallSync = installAutoSync(store.load); if (authenticated.value) void syncNow().then(async () => { await store.load(); openTodoFromUrl() }).catch(()=>{}); else openTodoFromUrl() })
+onMounted(async () => { window.addEventListener(authExpiredEvent, handleAuthExpired); clockTimer = window.setInterval(() => { currentTime.value = new Date() }, 30_000); try { const saved = JSON.parse(localStorage.getItem(collapsedGroupsStorageKey) ?? '[]'); if (Array.isArray(saved) && saved.every(value => typeof value === 'string')) collapsedGroups.value = new Set(saved) } catch {} await store.load(); await taskRepository.purgeExpiredTombstones(); await draftRepository.purgeExpiredTombstones(); await profileRepository.purgeExpiredTombstones(); const settings = await getSettings(); const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; if (settings.updatedAt === new Date(0).toISOString() || settings.timezone !== timezone) await saveSettings({ ...settings, timezone, updatedAt: new Date().toISOString() }, true); await store.load(); await profiles.load(); draftCount.value = (await draftRepository.list()).filter(d => d.content.trim()).length; uninstallSync = installAutoSync(() => { void store.load(); void profiles.load() }); if (authenticated.value) void syncNow().then(async () => { await store.load(); await profiles.load(); openTodoFromUrl() }).catch(()=>{}); else openTodoFromUrl() })
 onUnmounted(() => { uninstallSync?.(); window.clearInterval(clockTimer); window.removeEventListener(authExpiredEvent, handleAuthExpired) })
 const filtered = computed(() => store.sorted)
 const groups = computed(() => buildHomeTaskGroups(filtered.value, currentTime.value))
@@ -41,8 +43,7 @@ async function saveTask(patch: Partial<Task> & { title: string }) { if (editing.
 async function remove(id: string) { await store.softDelete(id); sheet.value = null; editing.value = undefined }
 async function addParsed(tasks: ParsedTask[], draftId?: string) { await store.createParsed(tasks); if (draftId) await draftRepository.delete(draftId); draftToOpen.value = undefined; screen.value = 'home'; draftCount.value = (await draftRepository.list()).length }
 function logout() { api.logout(); authenticated.value = false; screen.value = 'home' }
-async function loggedIn() { authenticated.value = true; await syncNow().catch(() => false); await store.load(); openTodoFromUrl() }
-function editFromSearch(task: Task) { editing.value = task; screen.value = 'home'; sheet.value = 'edit' }
+async function loggedIn() { authenticated.value = true; await syncNow().catch(() => false); await store.load(); await profiles.load(); openTodoFromUrl() }
 function editFromCompleted(task: Task) { editing.value = task; screen.value = 'home'; sheet.value = 'edit' }
 function editFromCalendar(task: Task) { editing.value = task; screen.value = 'home'; sheet.value = 'edit' }
 function openDraft(id: string) { draftToOpen.value = id; screen.value = 'ai' }
@@ -82,13 +83,13 @@ async function finishReorder(id: string) { if (draggingTaskId.value !== id) retu
   <AIInboxView v-else-if="screen === 'ai'" :draft-id="draftToOpen" @close="draftToOpen=undefined;screen='home'" @confirm="addParsed" />
   <CalendarView v-else-if="screen === 'calendar'" @close="screen='home'" @edit="editFromCalendar" />
   <CompletedView v-else-if="screen === 'completed'" @close="screen='home'" @edit="editFromCompleted" />
+  <ProfileView v-else-if="screen === 'profile'" @close="screen='home'" />
   <SettingsView v-else-if="screen === 'settings'" @close="screen='home'" @logout="logout" />
-  <SearchView v-else-if="screen === 'search'" @close="screen='home'" @edit="editFromSearch" @open-draft="openDraft" />
   <div v-else class="app-shell" @click="closeSwipeActionsFromBlank">
-    <header class="topbar"><div><h1>Todo</h1><p>{{ store.active.length }} 件在路上</p></div><div class="top-actions"><button class="icon-action" aria-label="日历" @click="screen='calendar'"><CalendarDays :size="23" :stroke-width="2.1"/></button><button class="search-button" aria-label="搜索" @click="screen='search'"><Search :size="23" :stroke-width="2.1"/></button></div></header>
+    <header class="topbar"><div><h1>Todo</h1><p>{{ store.active.length }} 件在路上</p></div><div class="top-actions"><button class="icon-action" aria-label="日历" @click="screen='calendar'"><CalendarDays :size="23" :stroke-width="2.1"/></button></div></header>
     <main class="task-list"><section v-for="group in groups" :key="group.key" class="task-group" :class="{ 'attention-group': group.attention }" :data-task-group="group.key"><button class="task-group-header" :aria-expanded="!collapsedGroups.has(group.key)" @click.stop="toggleGroup(group.key)"><h2><span v-if="group.attention" class="attention-mark"><CircleAlert :size="17" :stroke-width="2.15"/></span><span>{{ group.label }}</span><small v-if="group.attention">· {{ group.tasks.length }}</small></h2><ChevronDown :size="17" :class="{ collapsed: collapsedGroups.has(group.key) }"/></button><TransitionGroup v-if="!collapsedGroups.has(group.key)" name="task-reorder" tag="div" class="task-group-rows"><TaskRow v-for="task in group.tasks" :key="task.id" :task="task" :now="currentTime" :reorderable="!group.attention" :reordering="Boolean(draggingTaskId)" :is-drag-source="draggingTaskId === task.id" @edit="openEdit" @date="openDate" @complete="store.complete" @restore="store.restore" @remove="remove" @reorder-start="startReorder" @reorder-move="moveReorder" @reorder-end="finishReorder"/></TransitionGroup></section><div v-if="!groups.length" class="empty home-empty"><span>✓</span><h2>现在没有要做的事</h2><p>想到什么，随手丢进来。</p></div></main>
-    <article v-if="dragGhost" class="drag-ghost" :style="{ top: `${dragGhost.top}px`, left: `${dragGhost.left}px`, width: `${dragGhost.width}px` }"><span class="check"></span><div class="task-main"><span class="task-title">{{ dragGhost.task.title }}</span><span class="task-meta">{{ formatTaskDate(dragGhost.task) }}</span></div><GripVertical class="drag-ghost-handle" :size="19" :stroke-width="1.8"/></article>
-    <nav class="bottom-nav"><button aria-label="设置" @click="screen='settings'"><span><Settings :size="22" :stroke-width="1.8"/></span>设置</button><button class="add-button" aria-label="添加任务" @click="sheet='add'"><Plus :size="31" :stroke-width="2.2"/></button><button aria-label="已完成任务" @click="screen='completed'"><span><Check :size="23" :stroke-width="2"/></span>已完成</button></nav>
+    <article v-if="dragGhost" class="drag-ghost" :style="{ top: `${dragGhost.top}px`, left: `${dragGhost.left}px`, width: `${dragGhost.width}px` }"><div class="task-main"><span class="task-title">{{ dragGhost.task.title }}</span><span class="task-meta">{{ formatTaskDate(dragGhost.task) }}</span></div><GripVertical class="drag-ghost-handle" :size="19" :stroke-width="1.8"/></article>
+    <nav class="bottom-nav"><button aria-label="设置" @click="screen='settings'"><span><Settings :size="22" :stroke-width="1.8"/></span>设置</button><button class="add-button" aria-label="添加任务" @click="sheet='add'"><Plus :size="31" :stroke-width="2.2"/></button><button aria-label="资料" @click="screen='profile'"><span><Files :size="23" :stroke-width="2"/></span>资料</button></nav>
     <div v-if="store.lastDeleted" class="toast">已删除 <button @click="store.undoDelete">撤销</button></div>
     <BottomSheet v-if="sheet==='add'" title="添加" @close="sheet=null"><div class="add-choices"><button @click="sheet='quick'"><span class="choice-icon">＋</span><div><strong>快速添加任务</strong><small>知道要记什么，立即保存</small></div><span>›</span></button><button @click="sheet=null;screen='ai'"><span class="choice-icon ai">✦</span><div><strong>AI 整理</strong><small>一次输入多件事，确认后添加</small></div><span v-if="draftCount" class="draft-badge">{{ draftCount }}</span><span>›</span></button></div></BottomSheet>
     <TaskEditor v-if="sheet==='quick'" quick @close="sheet=null" @save="saveTask" @remove="remove"/>

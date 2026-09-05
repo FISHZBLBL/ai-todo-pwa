@@ -1,7 +1,20 @@
 export type TaskSource = 'manual' | 'ai'
 export type ReminderMode = 'auto' | 'explicit' | 'off'
 export type ReminderSource = 'auto' | 'explicit'
-export interface TaskReminder { id: string; at: string; eventId: string | null; sentAt: string | null; source: ReminderSource }
+export type ReminderRecurrenceUnit = 'day' | 'week'
+export type ReminderRecurrenceEnd = 'never' | 'count' | 'date'
+export interface ReminderRecurrence {
+  unit: ReminderRecurrenceUnit
+  interval: number
+  end: ReminderRecurrenceEnd
+  count: number | null
+  until: string | null
+  occurrence: number
+  timezone: string
+  /** Show a decreasing amount of time until the final occurrence. */
+  countdown: boolean
+}
+export interface TaskReminder { id: string; at: string; eventId: string | null; sentAt: string | null; source: ReminderSource; recurrence?: ReminderRecurrence | null }
 
 export interface DateRange { start: string; end: string }
 
@@ -39,6 +52,16 @@ export interface Draft {
   deletedAt?: string | null
 }
 
+/** A private, free-form personal record. Titles are intentionally optional. */
+export interface ProfileEntry {
+  id: string
+  title: string | null
+  content: string
+  createdAt: string
+  updatedAt: string
+  deletedAt?: string | null
+}
+
 export interface Settings {
   id: 'settings'
   dailySummaryTime: string
@@ -56,6 +79,7 @@ export interface ParsedReminder {
   time: string | null
   /** Preview-only wording for an explicitly requested but still ambiguous reminder. */
   period: ReminderPeriod | null
+  recurrence?: Omit<ReminderRecurrence, 'occurrence' | 'timezone'> | null
 }
 
 export interface ParsedTask {
@@ -69,4 +93,4 @@ export interface ParsedTask {
   selected?: boolean
 }
 
-export interface SyncChange { entity: 'task' | 'draft' | 'settings'; value: Task | Draft | Settings; queuedAt: string }
+export interface SyncChange { entity: 'task' | 'draft' | 'profile' | 'settings'; value: Task | Draft | ProfileEntry | Settings; queuedAt: string }

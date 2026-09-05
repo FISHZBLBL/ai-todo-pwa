@@ -1,15 +1,16 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
-import type { Draft, Settings, SyncChange, Task } from '../types'
+import type { Draft, ProfileEntry, Settings, SyncChange, Task } from '../types'
 
 interface TodoDB extends DBSchema {
   tasks: { key: string; value: Task; indexes: { updatedAt: string } }
   drafts: { key: string; value: Draft; indexes: { updatedAt: string } }
+  profiles: { key: string; value: ProfileEntry; indexes: { updatedAt: string } }
   syncQueue: { key: number; value: SyncChange }
   meta: { key: string; value: unknown }
 }
 
 const DB_NAME = 'ai-todo'
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 let database: Promise<IDBPDatabase<TodoDB>> | undefined
 
 export function db() {
@@ -22,6 +23,10 @@ export function db() {
       if (!database.objectStoreNames.contains('drafts')) {
         const drafts = database.createObjectStore('drafts', { keyPath: 'id' })
         drafts.createIndex('updatedAt', 'updatedAt')
+      }
+      if (!database.objectStoreNames.contains('profiles')) {
+        const profiles = database.createObjectStore('profiles', { keyPath: 'id' })
+        profiles.createIndex('updatedAt', 'updatedAt')
       }
       if (!database.objectStoreNames.contains('syncQueue')) database.createObjectStore('syncQueue', { autoIncrement: true })
       if (!database.objectStoreNames.contains('meta')) database.createObjectStore('meta')

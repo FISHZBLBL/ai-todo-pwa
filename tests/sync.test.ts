@@ -13,7 +13,7 @@ describe('同步冲突', () => {
     const makeTask = (id: string): Task => ({ id, title: id, dueDate: null, dateRange: null, startTime: null, endTime: null, reminderMode: 'off', reminders: [], pinned: false, completed: false, createdAt: '2026-08-27T00:00:00.000Z', updatedAt: '2026-08-27T00:00:00.000Z', source: 'manual' })
     await taskRepository.save(makeTask('11111111-1111-4111-8111-111111111111'))
     localStorage.setItem('todo-session', 'test-token')
-    vi.stubGlobal('fetch', vi.fn(async () => { await taskRepository.save(makeTask('22222222-2222-4222-8222-222222222222')); return { ok: true, status: 200, json: async () => ({ tasks: [], drafts: [], settings: null }) } as Response }))
+    vi.stubGlobal('fetch', vi.fn(async () => { await taskRepository.save(makeTask('22222222-2222-4222-8222-222222222222')); return { ok: true, status: 200, json: async () => ({ tasks: [], drafts: [], profiles: [], settings: null }) } as Response }))
     await expect(syncNow()).resolves.toBe(true)
     const queued = await (await db()).getAll('syncQueue')
     expect(queued).toHaveLength(1)

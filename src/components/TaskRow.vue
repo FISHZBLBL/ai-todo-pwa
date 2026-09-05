@@ -22,7 +22,7 @@ onUnmounted(() => { stopListening?.(); stopGlobalDrag() })
 function onStart(event: PointerEvent) {
   if (props.reordering) return
   const target = event.target instanceof Element ? event.target : null
-  if (target?.closest('.check,.url-link,.desktop-actions,.drag-handle')) return
+  if (target?.closest('.url-link,.desktop-actions,.drag-handle')) return
   requestCloseSwipeActions(props.task.id); startX.value = event.clientX; startY.value = event.clientY; horizontal.value = false
   event.currentTarget instanceof HTMLElement && event.currentTarget.setPointerCapture(event.pointerId)
 }
@@ -48,7 +48,6 @@ function finishDrag(event: PointerEvent) { event.preventDefault(); event.stopPro
   <div class="task-swipe" :class="{ overdue: attention?.overdue, 'drag-source': isDragSource }" :data-task-id="task.id">
     <button v-if="!reordering && !completedView" class="swipe-action complete-action" @click="runAction('complete')">完成</button><button v-if="!reordering" class="swipe-action delete-action" @click="runAction('delete')">删除</button>
     <article class="task-row" :style="{ transform: `translateX(${delta}px)` }" @click.capture="closeRevealed" @pointerdown="onStart" @pointermove="onMove" @pointerup="onEnd" @pointercancel="onEnd">
-      <button class="check" :class="{ checked: completedView }" :aria-label="completedView ? '恢复任务' : '完成任务'" @click="completedView ? emit('restore', task.id) : emit('complete', task.id)"><span v-if="completedView">✓</span></button>
       <div class="task-main"><button class="task-title-button" @click="emit('edit', task)"><span class="task-title" :class="{ done: completedView }">{{ task.title }}</span></button><button class="task-date-button task-meta" :class="{ overdue: attention?.overdue, 'reminder-attention': attention?.reminderStatus }" @click="emit('date', task)">{{ formatTaskDate(task, now) }}<template v-if="task.startTime"> · {{ task.startTime }}<template v-if="task.endTime">–{{ task.endTime }}</template></template><Bell v-if="task.reminders?.length" class="task-reminder-icon" :class="{ attention: attention?.reminderStatus }" :size="13" :stroke-width="1.8" :aria-hidden="Boolean(attention?.reminderStatus)" :aria-label="attention?.reminderStatus ? undefined : '任务提醒'"/><template v-if="attention?.reminderStatus === 'sent'"> · 已提醒</template><template v-else-if="attention?.reminderStatus === 'unsent'"> · 提醒未送达</template><template v-if="attention?.overdue"> · 已过期</template></button></div>
       <button v-if="reorderable && !completedView" class="drag-handle" aria-label="长按并拖动以排序" title="长按拖动排序" @contextmenu.prevent @pointerdown.stop="onDragStart" @pointermove.stop="onDragMove" @pointerup.stop="finishDrag" @pointercancel.stop="finishDrag"><GripVertical :size="19" :stroke-width="1.8"/></button>
       <a v-if="task.url" class="url-link" :href="task.url" target="_blank" rel="noopener" aria-label="打开链接">↗</a><span v-if="task.pinned" class="pin" aria-label="已置顶">★</span>

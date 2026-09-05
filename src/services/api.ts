@@ -28,10 +28,10 @@ export const api = {
     ;(remember ? localStorage : sessionStorage).setItem(tokenKey, result.token)
   },
   logout() { localStorage.removeItem(tokenKey); sessionStorage.removeItem(tokenKey) },
-  parse(content: string, signal?: AbortSignal) {
-    return request<{ tasks: ParsedTask[] }>('/ai/parse', { method: 'POST', signal, body: JSON.stringify({ content, currentLocalDateTime: localIsoWithOffset(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: navigator.language }) })
+  parse(content: string, dailySummaryTime = '08:00', signal?: AbortSignal) {
+    return request<{ tasks: ParsedTask[] }>('/ai/parse', { method: 'POST', signal, body: JSON.stringify({ content, currentLocalDateTime: localIsoWithOffset(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: navigator.language, dailySummaryTime }) })
   },
-  sync(changes: SyncChange[]) { return request<{ tasks: unknown[]; drafts: unknown[]; settings: unknown | null }>('/sync', { method: 'POST', body: JSON.stringify({ changes }) }) },
+  sync(changes: SyncChange[]) { return request<{ tasks: unknown[]; drafts: unknown[]; profiles: unknown[]; settings: unknown | null }>('/sync', { method: 'POST', body: JSON.stringify({ changes }) }) },
   health() { return request<{ ok: boolean; ai: { provider: string; model: string; configured: boolean } }>('/health') },
   getDeepseekSettings() { return request<{ deepseek: { configured: boolean; maskedKey: string | null; updatedAt: string | null } }>('/ai-settings/deepseek') },
   saveDeepseekKey(apiKey: string) { return request<{ deepseek: { configured: boolean; maskedKey: string | null; updatedAt: string | null } }>('/ai-settings/deepseek', { method: 'PUT', body: JSON.stringify({ apiKey }) }) },

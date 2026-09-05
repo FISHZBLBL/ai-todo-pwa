@@ -7,6 +7,7 @@ import { extractFirstUrl } from '../utils/url'
 import { syncNow } from '../sync/syncService'
 import { resolveReminderState } from '../utils/reminder'
 import { parsedTaskToTaskInput } from '../ai/reminderPreview'
+import { getSettings } from '../storage/database'
 
 const nowIso = () => new Date().toISOString()
 export const useTaskStore = defineStore('tasks', () => {
@@ -49,7 +50,10 @@ export const useTaskStore = defineStore('tasks', () => {
   }
   function scheduleSync() { window.clearTimeout(syncTimer); syncTimer = window.setTimeout(() => void syncNow().catch(() => undefined), 100) }
   async function create(input: Partial<Task> & Pick<Task, 'title'>) { const task = build(input); tasks.value.push(task); await taskRepository.save(task); scheduleSync(); return task }
-  async function createParsed(items: ParsedTask[]) { for (const item of items.filter(item => item.selected !== false)) await create({ ...parsedTaskToTaskInput(item), source: 'ai' }) }
+  async function createParsed(items: ParsedTask[]) {
+    const settings = await getSettings()
+    for (const item of items.filter(item => item.selected !== false)) await create({ ...parsedTaskToTaskInput(item, settings), source: 'ai' })
+  }
   async function update(id: string, patch: Partial<Task>) {
     const index = tasks.value.findIndex(task => task.id === id); if (index < 0) return
     const normalized = patch.title && patch.url == null ? { ...patch, url: extractFirstUrl(patch.title) } : patch
