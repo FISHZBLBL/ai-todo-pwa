@@ -1,1 +1,1 @@
-exports.main = require('./dist-server/scf.js').main
+exports.main = require('./dist-server/server/scf.js').main

@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import { clientsClaim } from 'workbox-core'
-import { cleanupOutdatedCaches, precacheAndRoute } from 'workbox-precaching'
-import { registerRoute } from 'workbox-routing'
+import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching'
+import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { StaleWhileRevalidate } from 'workbox-strategies'
 
 declare let self: ServiceWorkerGlobalScope
@@ -9,6 +9,7 @@ precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
 clientsClaim()
 self.skipWaiting()
+registerRoute(new NavigationRoute(createHandlerBoundToURL(`${import.meta.env.BASE_URL}index.html`), { denylist: [/\/api(?:\/|$)/] }))
 registerRoute(({ request }) => ['document', 'script', 'style', 'font'].includes(request.destination), new StaleWhileRevalidate({ cacheName: 'todo-app-shell' }))
 self.addEventListener('push', event => {
   const data = event.data?.json() ?? { title: 'Todo', body: '你有新的任务提醒', url: '/' }

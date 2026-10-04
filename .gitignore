@@ -9,3 +9,4 @@ scf/dist-server/
 data/
 coverage/
 *.log
+/design-qa.md

@@ -7,7 +7,7 @@ inputs:
     exclude:
       - '.env*'
   installDependency: true
-  handler: dist-server/scf.main
+  handler: dist-server/server/scf.main
   runtime: Nodejs20.19
   region: ap-shanghai
   memorySize: 256

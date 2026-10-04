@@ -1,4 +1,4 @@
-import { AsyncWorkloadsClient } from '@netlify/async-workloads'
+import { AsyncWorkloadsClient, ErrorRetryAfterDelay } from '@netlify/async-workloads'
 import { cloudStore, type DailySummarySchedule } from '../storage.js'
 
 export const DAILY_SUMMARY_EVENT = 'daily.summary' as const
@@ -8,7 +8,7 @@ export interface DailySummaryEventSender {
 }
 
 interface DailySummarySettings { dailySummaryTime: string; timezone: string }
-interface EnsureOptions { skipCancellationForEventId?: string }
+interface EnsureOptions { skipCancellationForEventId?: string; recoverOverdueAfterMs?: number }
 
 const defaultSender = () => new AsyncWorkloadsClient() as DailySummaryEventSender
 
@@ -53,18 +53,44 @@ async function cancel(eventId: string, sender: DailySummaryEventSender) {
 }
 
 export async function ensureDailySummarySchedule(sender: DailySummaryEventSender = defaultSender(), now = new Date(), options: EnsureOptions = {}) {
-  const { settings, schedule } = await cloudStore.getDailySummaryScheduleState()
-  const scheduledFor = new Date(nextDailySummaryAt(settings, now)).toISOString()
-  if (schedule && schedule.scheduledFor === scheduledFor && schedule.dailySummaryTime === settings.dailySummaryTime && schedule.timezone === settings.timezone) return { scheduled: false as const, schedule }
-  if (schedule && schedule.eventId !== options.skipCancellationForEventId) await cancel(schedule.eventId, sender)
-  const result = await sender.send(DAILY_SUMMARY_EVENT, { data: { scheduledFor }, delayUntil: Date.parse(scheduledFor) })
-  if (result.sendStatus !== 'succeeded') throw new Error('创建每日汇总事件失败')
-  const next: DailySummarySchedule = { eventId: result.eventId, scheduledFor, dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone }
-  await cloudStore.setDailySummarySchedule(next)
-  return { scheduled: true as const, schedule: next }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { settings, schedule } = await cloudStore.getDailySummaryScheduleState()
+    const sameSettings = schedule?.dailySummaryTime === settings.dailySummaryTime && schedule.timezone === settings.timezone
+    const recovering = Boolean(schedule && options.recoverOverdueAfterMs != null && now.getTime() - Date.parse(schedule.scheduledFor) >= options.recoverOverdueAfterMs)
+    // Reaching the clock time does not mean delivery has completed. Preserve
+    // delayed/retrying events during ordinary sync, even after their due time.
+    if (schedule && sameSettings && schedule.eventId !== options.skipCancellationForEventId && !recovering) return { scheduled: false as const, schedule }
+    // A replacement gets a fresh due timestamp so subsequent maintenance runs
+    // leave its retry window intact instead of replacing it every five minutes.
+    const scheduledFor = recovering && sameSettings ? now.toISOString() : new Date(nextDailySummaryAt(settings, now)).toISOString()
+    const result = await sender.send(DAILY_SUMMARY_EVENT, { data: { scheduledFor }, delayUntil: recovering && sameSettings ? now.getTime() + 60_000 : Date.parse(scheduledFor) })
+    if (result.sendStatus !== 'succeeded') throw new Error('创建每日汇总事件失败')
+    const next: DailySummarySchedule = { eventId: result.eventId, scheduledFor, dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone }
+    const stored = await cloudStore.setDailySummaryScheduleIfCurrent(next, schedule, settings)
+    if (!stored) {
+      await cancel(result.eventId, sender)
+      continue
+    }
+    // Publish the new pointer before cancelling the old event. A slow request
+    // cannot cancel a newer schedule created after the state it read.
+    if (schedule && schedule.eventId !== options.skipCancellationForEventId) await cancel(schedule.eventId, sender)
+    return { scheduled: true as const, schedule: next }
+  }
+  throw new Error('每日汇总设置正在更新，请稍后重试')
 }
 
-export async function isCurrentDailySummaryEvent(eventId: string, scheduledFor: string) {
+export async function completeDailySummaryEvent(eventId: string, scheduledFor: string) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { settings, schedule } = await cloudStore.getDailySummaryScheduleState()
+    if (!schedule || schedule.eventId !== eventId || schedule.scheduledFor !== scheduledFor) return
+    if (await cloudStore.setDailySummaryScheduleIfCurrent(null, schedule, settings)) return
+  }
+  throw new Error('每日汇总完成状态保存失败')
+}
+
+export async function isCurrentDailySummaryEvent(eventId: string, scheduledFor: string, options: { waitForRegistration?: boolean } = {}) {
   const { schedule } = await cloudStore.getDailySummaryScheduleState()
-  return Boolean(schedule && schedule.eventId === eventId && schedule.scheduledFor === scheduledFor)
+  const current = Boolean(schedule && schedule.eventId === eventId && schedule.scheduledFor === scheduledFor)
+  if (!current && options.waitForRegistration && Date.now() <= Date.parse(scheduledFor) + 5 * 60_000) throw new ErrorRetryAfterDelay({ message: '每日汇总事件等待登记', retryDelay: '1m' })
+  return current
 }

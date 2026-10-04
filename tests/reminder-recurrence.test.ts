@@ -26,4 +26,8 @@ describe('重复提醒规则', () => {
     expect(recurringReminderBody('滴眼液使用期限', reminder())).toBe('还剩 11 周到期')
     expect(recurringReminderBody('滴眼液使用期限', reminder({ recurrence: { ...reminder().recurrence, occurrence: 12 } }))).toBe('已到设定期限，请停止使用')
   })
+  it('倒计时包含每次重复的间隔', () => {
+    expect(recurringReminderBody('期限', reminder({ recurrence: { ...reminder().recurrence, interval: 2, count: 3 } }))).toBe('还剩 4 周到期')
+    expect(recurringReminderBody('期限', reminder({ recurrence: { ...reminder().recurrence, unit: 'day', interval: 3, count: 3 } }))).toBe('还剩 6 天到期')
+  })
 })

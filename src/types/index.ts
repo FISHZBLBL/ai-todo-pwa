@@ -1,4 +1,5 @@
 export type TaskSource = 'manual' | 'ai'
+export type TaskKind = 'task' | 'checklist'
 export type ReminderMode = 'auto' | 'explicit' | 'off'
 export type ReminderSource = 'auto' | 'explicit'
 export type ReminderRecurrenceUnit = 'day' | 'week'
@@ -18,8 +19,26 @@ export interface TaskReminder { id: string; at: string; eventId: string | null; 
 
 export interface DateRange { start: string; end: string }
 
+export interface ChecklistItem {
+  id: string
+  text: string
+  completed: boolean
+  completedAt?: string | null
+}
+
+export interface ChecklistSection {
+  id: string
+  title: string
+  note?: string | null
+  items: ChecklistItem[]
+}
+
+export interface ChecklistContent { sections: ChecklistSection[] }
+
 export interface Task {
   id: string
+  /** Missing on legacy records; repositories normalize them to ordinary tasks. */
+  kind?: TaskKind
   title: string
   note?: string | null
   url?: string | null
@@ -39,6 +58,7 @@ export interface Task {
   deletedAt?: string | null
   recurrence?: null
   source: TaskSource
+  checklist?: ChecklistContent | null
 }
 
 export type DraftStatus = 'idle' | 'parsing' | 'failed' | 'parsed'
@@ -83,6 +103,7 @@ export interface ParsedReminder {
 }
 
 export interface ParsedTask {
+  kind?: 'task'
   title: string
   dueDate: string | null
   dateRange: DateRange | null
@@ -92,5 +113,15 @@ export interface ParsedTask {
   reminders?: ParsedReminder[]
   selected?: boolean
 }
+
+export interface ParsedChecklistItem { text: string; selected?: boolean }
+export interface ParsedChecklistSection { title: string; note?: string | null; items: ParsedChecklistItem[] }
+export interface ParsedChecklist {
+  kind: 'checklist'
+  title: string
+  sections: ParsedChecklistSection[]
+  selected?: boolean
+}
+export type ParsedInboxItem = ParsedTask | ParsedChecklist
 
 export interface SyncChange { entity: 'task' | 'draft' | 'profile' | 'settings'; value: Task | Draft | ProfileEntry | Settings; queuedAt: string }

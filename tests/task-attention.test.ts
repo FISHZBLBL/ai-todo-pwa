@@ -47,6 +47,20 @@ describe('task attention', () => {
     expect(getTaskAttention(value, now)).toBeNull()
     expect(buildHomeTaskGroups([value], now)[0]?.key).toBe('无日期')
   })
+
+  it('orders future groups by the actual date rather than their Chinese labels', () => {
+    const current = new Date(2026, 8, 25, 12)
+    const values = [task('october', { dueDate: '2026-10-01' }), task('tomorrow', { dueDate: '2026-09-26' }), task('undated'), task('today', { dueDate: '2026-09-25' })]
+    expect(buildHomeTaskGroups(values, current).map(group => group.tasks[0].id)).toEqual(['today', 'tomorrow', 'october', 'undated'])
+  })
+
+  it('keeps identical display labels in different years in distinct groups', () => {
+    const values = [task('next-year', { dueDate: '2027-10-06' }), task('this-year', { dueDate: '2026-10-06' })]
+    const groups = buildHomeTaskGroups(values, now)
+    expect(groups).toHaveLength(2)
+    expect(groups.map(group => group.tasks[0].id)).toEqual(['this-year', 'next-year'])
+    expect(groups[0].key).not.toBe(groups[1].key)
+  })
 })
 
 describe('task overdue boundary', () => {

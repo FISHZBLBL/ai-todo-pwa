@@ -1,5 +1,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import type { Draft, ProfileEntry, Settings, SyncChange, Task } from '../types'
+import { settingsValueSchema } from '../../shared/syncSchema'
+import { nextTimestamp, validateRecord } from './validation'
 
 interface TodoDB extends DBSchema {
   tasks: { key: string; value: Task; indexes: { updatedAt: string } }
@@ -50,8 +52,14 @@ export async function getSettings(): Promise<Settings> {
 
 export async function saveSettings(settings: Settings, shouldQueue = false) {
   const database = await db()
-  await database.put('meta', settings, 'settings')
-  if (shouldQueue) await database.add('syncQueue', { entity: 'settings', value: settings, queuedAt: new Date().toISOString() } satisfies SyncChange)
+  let normalized = validateRecord(settingsValueSchema, settings)
+  const transaction = database.transaction(['meta', 'syncQueue'], 'readwrite')
+  const previous = await transaction.objectStore('meta').get('settings') as Settings | undefined
+  if (shouldQueue && previous && normalized.updatedAt <= previous.updatedAt) normalized = { ...normalized, updatedAt: nextTimestamp(previous.updatedAt) }
+  await transaction.objectStore('meta').put(normalized, 'settings')
+  if (shouldQueue) await transaction.objectStore('syncQueue').add({ entity: 'settings', value: normalized, queuedAt: new Date().toISOString() } satisfies SyncChange)
+  await transaction.done
+  return normalized
 }
 export async function resetDatabaseForTests() {
   if (database) (await database).close()

@@ -4,7 +4,7 @@
     "noEmit": false,
     "module": "CommonJS",
     "moduleResolution": "Node",
-    "rootDir": ".",
+    "rootDir": "..",
     "outDir": "../scf/dist-server",
     "sourceMap": true,
     "declaration": false

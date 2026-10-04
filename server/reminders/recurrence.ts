@@ -53,7 +53,7 @@ export function recurringReminderBody(title: string, reminder: RecurringReminder
   if (rule.end === 'count' && rule.count != null) {
     const remaining = Math.max(0, rule.count - rule.occurrence)
     if (remaining === 0) return '已到设定期限，请停止使用'
-    return `还剩 ${remaining} ${rule.unit === 'week' ? '周' : '天'}到期`
+    return `还剩 ${remaining * rule.interval} ${rule.unit === 'week' ? '周' : '天'}到期`
   }
   return `${title}的期限正在接近`
 }

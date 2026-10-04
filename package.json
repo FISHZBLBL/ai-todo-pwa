@@ -5,13 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:server": "tsx watch server/index.ts",
-    "build": "vue-tsc --noEmit && vite build && pnpm run build:server",
+    "dev:server": "node --env-file-if-exists=.env.local --import tsx --watch server/index.ts",
+    "build": "vue-tsc --noEmit && vite build && tsc -p server/tsconfig.build.json",
     "build:server": "tsc -p server/tsconfig.build.json",
     "typecheck": "vue-tsc --noEmit && tsc -p server/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "server": "tsx server/index.ts"
+    "server": "node --env-file-if-exists=.env.local --import tsx server/index.ts"
   },
   "dependencies": {
     "@cloudbase/js-sdk": "^3.8.2",

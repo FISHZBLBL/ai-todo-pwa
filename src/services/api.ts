@@ -1,6 +1,15 @@
-import type { ParsedTask, SyncChange } from '../types'
+import type { Draft, ParsedInboxItem, ProfileEntry, Settings, SyncChange, Task } from '../types'
 
-const base = import.meta.env.VITE_API_URL ?? '/api'
+export interface SyncResponse {
+  tasks: Task[]
+  drafts: Draft[]
+  profiles?: ProfileEntry[]
+  settings: Settings | null
+  deletions?: Array<{ entity: 'task' | 'draft' | 'profile'; id: string; updatedAt: string; deletedAt: string }>
+  reminderSchedulingPending?: boolean
+}
+
+const base = (import.meta.env.VITE_API_URL?.trim() || '/api').replace(/\/+$/, '')
 const tokenKey = 'todo-session'
 export const authExpiredEvent = 'todo-auth-expired'
 function localIsoWithOffset(date = new Date()) {
@@ -29,9 +38,9 @@ export const api = {
   },
   logout() { localStorage.removeItem(tokenKey); sessionStorage.removeItem(tokenKey) },
   parse(content: string, dailySummaryTime = '08:00', signal?: AbortSignal) {
-    return request<{ tasks: ParsedTask[] }>('/ai/parse', { method: 'POST', signal, body: JSON.stringify({ content, currentLocalDateTime: localIsoWithOffset(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: navigator.language, dailySummaryTime }) })
+    return request<{ tasks: ParsedInboxItem[] }>('/ai/parse', { method: 'POST', signal, body: JSON.stringify({ content, currentLocalDateTime: localIsoWithOffset(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: navigator.language, dailySummaryTime }) })
   },
-  sync(changes: SyncChange[]) { return request<{ tasks: unknown[]; drafts: unknown[]; profiles: unknown[]; settings: unknown | null }>('/sync', { method: 'POST', body: JSON.stringify({ changes }) }) },
+  sync(changes: SyncChange[]) { return request<SyncResponse>('/sync', { method: 'POST', body: JSON.stringify({ changes }) }) },
   health() { return request<{ ok: boolean; ai: { provider: string; model: string; configured: boolean } }>('/health') },
   getDeepseekSettings() { return request<{ deepseek: { configured: boolean; maskedKey: string | null; updatedAt: string | null } }>('/ai-settings/deepseek') },
   saveDeepseekKey(apiKey: string) { return request<{ deepseek: { configured: boolean; maskedKey: string | null; updatedAt: string | null } }>('/ai-settings/deepseek', { method: 'PUT', body: JSON.stringify({ apiKey }) }) },

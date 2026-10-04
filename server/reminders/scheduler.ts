@@ -10,6 +10,16 @@ export interface AsyncEventSender {
 
 const defaultSender = () => new AsyncWorkloadsClient() as AsyncEventSender
 
+export function isReminderSchedulingAvailable() {
+  const runtime = globalThis as typeof globalThis & { Netlify?: { context?: { url?: string } } }
+  try {
+    const url = runtime.Netlify?.context?.url
+    return Boolean(url && ['https:', 'http:'].includes(new URL(url).protocol))
+  } catch { return false }
+}
+
+interface ReconcileOptions { includeOverdue?: boolean }
+
 export async function cancelReminderEvents(eventIds: string[], sender: AsyncEventSender = defaultSender()) {
   const unique = [...new Set(eventIds.filter(Boolean))]
   if (!unique.length) return
@@ -17,7 +27,7 @@ export async function cancelReminderEvents(eventIds: string[], sender: AsyncEven
   if (result.sendStatus !== 'succeeded') throw new Error('取消旧提醒事件失败')
 }
 
-export async function reconcileReminder(transition: ReminderTransition, sender: AsyncEventSender = defaultSender(), now = Date.now()) {
+export async function reconcileReminder(transition: ReminderTransition, sender: AsyncEventSender = defaultSender(), now = Date.now(), options: ReconcileOptions = {}) {
   await cancelReminderEvents(transition.oldEventIds, sender)
   const task = await cloudStore.getTask(transition.todoId)
   if (!task || task.completed || task.deletedAt) return { skipped: 'disabled' as const }
@@ -28,9 +38,10 @@ export async function reconcileReminder(transition: ReminderTransition, sender: 
     if (reminder.sentAt || reminder.eventId) continue
     const reminderAt = Date.parse(reminder.at)
     if (!Number.isFinite(reminderAt)) throw new Error('提醒时间无效')
-    if (reminderAt <= now) continue
+    if (reminderAt <= now && !options.includeOverdue) continue
     if (reminderAt >= now + MAX_DELAY_MS) throw new Error('提醒时间不能超过一年')
-    const result = await sender.send(TODO_REMINDER_EVENT, { data: legacy ? { todoId: task.id } : { todoId: task.id, reminderId: reminder.id }, delayUntil: reminderAt })
+    const deliveryAt = reminderAt <= now ? now + 60_000 : reminderAt
+    const result = await sender.send(TODO_REMINDER_EVENT, { data: legacy ? { todoId: task.id } : { todoId: task.id, reminderId: reminder.id }, delayUntil: deliveryAt })
     if (result.sendStatus !== 'succeeded') throw new Error('创建提醒事件失败')
     const stored = legacy ? await cloudStore.setReminderEvent(task.id, reminder.at, result.eventId) : await cloudStore.setReminderEvent(task.id, reminder.id, reminder.at, result.eventId)
     if (!stored) { await cancelReminderEvents([result.eventId], sender); continue }

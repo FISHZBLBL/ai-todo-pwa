@@ -20,6 +20,7 @@ function normalizeReminder(value: unknown): unknown {
 
 function normalizeTask(value: unknown): unknown {
   if (!isObject(value)) return value
+  if (value.kind === 'checklist') return value
   const { reminder, reminders, ...task } = value
   if (Array.isArray(reminders)) return { ...task, reminders: reminders.map(normalizeReminder) }
   if (isObject(reminder)) return { ...task, reminders: [normalizeReminder(reminder)] }

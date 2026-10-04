@@ -23,4 +23,9 @@ describe('AI response contract', () => {
   })
   it('拒绝早于首次提醒的结束日期', () => expect(() => parseAIResponse({ tasks: [{ title: '周期提醒', reminders: [{ requested: true, date: '2026-09-12', time: '08:00', recurrence: { unit: 'week', interval: 1, end: 'date', until: '2026-09-05' } }] }] })).toThrow())
   it('旧 singular reminder 只在 normalization 边界转为 reminders', () => expect(parseAIResponse({ tasks: [{ title: '做实验', reminder: { requested: true, date: '2026-08-30', time: '20:00' } }] }).tasks[0]?.reminders).toEqual([{ requested: true, date: '2026-08-30', time: '20:00', period: null, recurrence: null }]))
+  it('接受分组清单并将说明与可勾选项分开', () => {
+    const result = parseAIResponse({ tasks: [{ kind: 'checklist', title: '四川旅行', sections: [{ title: '衣物', note: '现有鞋够用', items: [{ text: '雨壳' }, { text: '头灯' }] }] }] })
+    expect(result.tasks[0]).toMatchObject({ kind: 'checklist', title: '四川旅行', sections: [{ title: '衣物', note: '现有鞋够用', items: [{ text: '雨壳' }, { text: '头灯' }] }] })
+  })
+  it('清单不能携带提醒', () => expect(() => parseAIResponse({ tasks: [{ kind: 'checklist', title: '旅行', reminders: [{ requested: true, date: '2026-10-01', time: '08:00' }], sections: [{ title: '清单', items: [{ text: '雨壳' }] }] }] })).toThrow())
 })

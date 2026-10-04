@@ -1,13 +1,15 @@
 import { computed, onScopeDispose, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { taskRepository } from '../repositories/taskRepository'
-import { formatTaskDate, isOverdue, toDateKey } from '../utils/date'
-import type { ParsedTask, Task } from '../types'
+import { isOverdue, taskDateKey, toDateKey } from '../utils/date'
+import type { ChecklistContent, ParsedInboxItem, Task } from '../types'
 import { extractFirstUrl } from '../utils/url'
 import { syncNow } from '../sync/syncService'
 import { resolveReminderState } from '../utils/reminder'
 import { parsedTaskToTaskInput } from '../ai/reminderPreview'
 import { getSettings } from '../storage/database'
+import { cloneChecklist, parsedChecklistContent } from '../utils/checklist'
+import { parsedInboxItemError } from '../ai/inboxValidation'
 
 const nowIso = () => new Date().toISOString()
 export const useTaskStore = defineStore('tasks', () => {
@@ -34,6 +36,7 @@ export const useTaskStore = defineStore('tasks', () => {
   window.addEventListener('pageshow', expireUndoToast)
   onScopeDispose(() => {
     clearUndoToast()
+    window.clearTimeout(syncTimer)
     document.removeEventListener('visibilitychange', expireUndoToast)
     window.removeEventListener('pageshow', expireUndoToast)
   })
@@ -46,22 +49,37 @@ export const useTaskStore = defineStore('tasks', () => {
     const now = nowIso()
     const dueDate = input.dueDate ?? null, startTime = input.startTime ?? null
     const reminder = resolveReminderState(undefined, input)
-    return { id: crypto.randomUUID(), title: input.title.trim(), note: input.note ?? null, url: input.url ?? extractFirstUrl(input.title), dueDate, dateRange: input.dateRange ?? null, startTime, endTime: input.endTime ?? null, ...reminder, pinned: input.pinned ?? false, sortOrder: null, completed: false, completedAt: null, createdAt: now, updatedAt: now, deletedAt: null, recurrence: null, source: input.source ?? 'manual' }
+    const kind = input.kind === 'checklist' ? 'checklist' : 'task'
+    return { id: crypto.randomUUID(), kind, title: input.title.trim(), note: input.note ?? null, url: kind === 'task' ? input.url ?? extractFirstUrl(input.title) : null, dueDate: kind === 'task' ? dueDate : null, dateRange: kind === 'task' ? input.dateRange ?? null : null, startTime: kind === 'task' ? startTime : null, endTime: kind === 'task' ? input.endTime ?? null : null, ...reminder, reminders: kind === 'task' ? reminder.reminders : [], reminderMode: kind === 'task' ? reminder.reminderMode : 'off', pinned: input.pinned ?? false, sortOrder: null, completed: false, completedAt: null, createdAt: now, updatedAt: now, deletedAt: null, recurrence: null, source: input.source ?? 'manual', checklist: kind === 'checklist' ? cloneChecklist(input.checklist) : null }
   }
   function scheduleSync() { window.clearTimeout(syncTimer); syncTimer = window.setTimeout(() => void syncNow().catch(() => undefined), 100) }
-  async function create(input: Partial<Task> & Pick<Task, 'title'>) { const task = build(input); tasks.value.push(task); await taskRepository.save(task); scheduleSync(); return task }
-  async function createParsed(items: ParsedTask[]) {
+  async function create(input: Partial<Task> & Pick<Task, 'title'>) { const task = await taskRepository.save(build(input)); tasks.value.push(task); scheduleSync(); return task }
+  async function createChecklist(input: { title: string; checklist: ChecklistContent; source?: Task['source'] }) {
+    return create({ kind: 'checklist', title: input.title, checklist: input.checklist, source: input.source ?? 'manual' })
+  }
+  async function createParsed(items: ParsedInboxItem[], draftId?: string) {
     const settings = await getSettings()
-    for (const item of items.filter(item => item.selected !== false)) await create({ ...parsedTaskToTaskInput(item, settings), source: 'ai' })
+    const selected = items.filter(item => item.selected !== false)
+    for (const item of selected) {
+      const error = parsedInboxItemError(item)
+      if (error) throw new Error(error)
+    }
+    const tasksToSave = selected.map(item => item.kind === 'checklist'
+      ? build({ kind: 'checklist', title: item.title, checklist: parsedChecklistContent(item), source: 'ai' })
+      : build({ ...parsedTaskToTaskInput(item, settings), source: 'ai' }))
+    const saved = await taskRepository.saveMany(tasksToSave, true, draftId)
+    tasks.value.push(...saved)
+    scheduleSync()
   }
   async function update(id: string, patch: Partial<Task>) {
-    const index = tasks.value.findIndex(task => task.id === id); if (index < 0) return
     const normalized = patch.title && patch.url == null ? { ...patch, url: extractFirstUrl(patch.title) } : patch
-    const reminder = resolveReminderState(tasks.value[index], normalized)
-    const task = { ...tasks.value[index], ...normalized, ...reminder, updatedAt: nowIso() }
     // Only expose the new state after IndexedDB and syncQueue commit together.
     // Seeing a completed/deleted row disappear now means the action is durable.
-    await taskRepository.save(task)
+    const task = await taskRepository.update(id, current => {
+      const reminder = resolveReminderState(current, normalized)
+      return { ...current, ...normalized, ...reminder, checklist: normalized.checklist === undefined ? current.checklist : cloneChecklist(normalized.checklist), updatedAt: nowIso() }
+    })
+    if (!task) return
     const currentIndex = tasks.value.findIndex(value => value.id === id)
     if (currentIndex >= 0) tasks.value[currentIndex] = task
     scheduleSync()
@@ -86,11 +104,9 @@ export const useTaskStore = defineStore('tasks', () => {
     tasks.value = tasks.value.map(task => positions.has(task.id) ? { ...task, sortOrder: positions.get(task.id)! } : task)
   }
   async function persistPositions(ids: string[]) {
-    const positions = new Map(ids.map((id, index) => [id, index]))
-    const updatedAt = nowIso()
-    tasks.value = tasks.value.map(task => positions.has(task.id) ? { ...task, sortOrder: positions.get(task.id)!, updatedAt } : task)
-    await taskRepository.saveMany(tasks.value.filter(task => positions.has(task.id)))
-    scheduleSync()
+    // Persist only the order patch against the latest record, so a concurrent
+    // completion or note change is never replaced by an earlier UI snapshot.
+    for (const [index, id] of ids.entries()) await update(id, { sortOrder: index })
   }
 
   const sorted = computed(() => [...active.value].sort((a, b) => {
@@ -107,9 +123,9 @@ export const useTaskStore = defineStore('tasks', () => {
       if (task.pinned) return '0-置顶'
       if (isOverdue(task)) return '1-过期'
       if (task.dueDate === today) return '2-今天'
-      if (task.dueDate) return `3-${formatTaskDate(task)}`
-      if (task.dateRange) return `4-${formatTaskDate(task)}`
-      return '5-无日期'
+      const date = taskDateKey(task)
+      if (date) return `3-${date}-${task.dueDate ? 'date' : `range-${task.dateRange?.end}`}`
+      return '4-无日期'
     }
     const byGroup = group(a).localeCompare(group(b))
     if (byGroup !== 0) return byGroup
@@ -117,5 +133,5 @@ export const useTaskStore = defineStore('tasks', () => {
     return key(a).localeCompare(key(b))
   }))
 
-  return { tasks, active, completed, sorted, loading, lastDeleted, load, create, createParsed, update, complete, restore, softDelete, undoDelete, positionTasks, persistPositions }
+  return { tasks, active, completed, sorted, loading, lastDeleted, load, create, createChecklist, createParsed, update, complete, restore, softDelete, undoDelete, positionTasks, persistPositions }
 })

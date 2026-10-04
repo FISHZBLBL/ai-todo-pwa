@@ -11,23 +11,72 @@ describe('多提醒 workload', () => {
   it('只发送 eventId 与 reminderId 同时匹配的 reminder，并独立标记 sentAt', async () => { getTask.mockResolvedValue(task()); const { handleTodoReminder } = await import('../netlify/functions/todo-reminder'); await handleTodoReminder(event() as never); expect(sendPushPayload).toHaveBeenCalledOnce(); expect(markReminderSent).toHaveBeenCalledWith('todo-1', 'r1', 'event-1') })
   it('stale、完成和删除事件不发送', async () => { const { handleTodoReminder } = await import('../netlify/functions/todo-reminder'); getTask.mockResolvedValue(task(reminder('other'))); await handleTodoReminder(event() as never); getTask.mockResolvedValue(task(reminder(), { completed: true })); await handleTodoReminder(event() as never); getTask.mockResolvedValue(task(reminder(), { deletedAt: '2026-01-01T00:00:00Z' })); await handleTodoReminder(event() as never); expect(sendPushPayload).not.toHaveBeenCalled() })
   it('已发送 reminder 重试不会重复推送', async () => { getTask.mockResolvedValue(task(reminder('event-1', new Date().toISOString()))); const { handleTodoReminder } = await import('../netlify/functions/todo-reminder'); await handleTodoReminder(event() as never); expect(sendPushPayload).not.toHaveBeenCalled() })
-  it('重复提醒发送后只安排下一次并原子推进', async () => {
+  it('新事件在 reminder 绑定前到达时重试，不会静默丢弃', async () => {
+    getTask.mockResolvedValue(task({ ...reminder(), eventId: null } as never))
+    const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
+    await expect(handleTodoReminder(event() as never)).rejects.toThrow()
+    expect(sendPushPayload).not.toHaveBeenCalled()
+    getTask.mockResolvedValue(task())
+    await handleTodoReminder(event() as never)
+    expect(sendPushPayload).toHaveBeenCalledOnce()
+  })
+  it('重复提醒发送后原子推进，由独立定时任务创建下一次事件', async () => {
     const value = { ...reminder(), recurrence: { unit: 'week', interval: 1, end: 'count', count: 12, until: null, occurrence: 1, timezone: 'Asia/Shanghai', countdown: true } }
     getTask.mockResolvedValue(task(value))
-    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'event-2' })) }
     const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
-    await handleTodoReminder(event() as never, sender)
+    await handleTodoReminder(event() as never)
     expect(sendPushPayload).toHaveBeenCalledWith(expect.objectContaining({ body: '还剩 11 周到期' }))
-    expect(sender.send).toHaveBeenCalledWith('todo.reminder', expect.objectContaining({ data: { todoId: 'todo-1', reminderId: 'r1' } }))
-    expect(advanceReminderOccurrence).toHaveBeenCalledWith('todo-1', 'r1', 'event-1', expect.objectContaining({ recurrence: expect.objectContaining({ occurrence: 2 }) }), 'event-2')
+    expect(advanceReminderOccurrence).toHaveBeenCalledWith('todo-1', 'r1', 'event-1', expect.objectContaining({ recurrence: expect.objectContaining({ occurrence: 2 }) }), null)
   })
   it('有限重复的最后一次不再创建事件并自动结束生命周期', async () => {
     const value = { ...reminder(), recurrence: { unit: 'week', interval: 1, end: 'count', count: 12, until: null, occurrence: 12, timezone: 'Asia/Shanghai', countdown: true } }
     getTask.mockResolvedValue(task(value))
-    const sender = { send: vi.fn() }
     const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
-    await handleTodoReminder(event() as never, sender)
-    expect(sender.send).not.toHaveBeenCalled()
+    await handleTodoReminder(event() as never)
     expect(advanceReminderOccurrence).toHaveBeenCalledWith('todo-1', 'r1', 'event-1', null, null)
+  })
+  it('Push 暂时失败不会缓存失败结果，成功后的状态保存重试不重复推送', async () => {
+    getTask.mockResolvedValue(task())
+    sendPushPayload.mockResolvedValueOnce({ sent: 0, failed: 1, subscriptions: 1 }).mockResolvedValue({ sent: 1, failed: 0, subscriptions: 1 })
+    markReminderSent.mockRejectedValueOnce(new Error('storage unavailable')).mockResolvedValue(true)
+    const cached = new Map<string, unknown>()
+    const workloadEvent = event()
+    workloadEvent.step.run = vi.fn(async (key: string, callback: () => unknown) => {
+      if (cached.has(key)) return cached.get(key)
+      const result = await callback()
+      cached.set(key, result)
+      return result
+    })
+    const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
+    await expect(handleTodoReminder(workloadEvent as never)).rejects.toThrow()
+    await expect(handleTodoReminder(workloadEvent as never)).rejects.toThrow('storage unavailable')
+    await handleTodoReminder(workloadEvent as never)
+    expect(sendPushPayload).toHaveBeenCalledTimes(2)
+    expect(markReminderSent).toHaveBeenCalledTimes(2)
+  })
+  it('总次数剩最后一次时推进到最后一条未调度提醒', async () => {
+    const value = { ...reminder(), recurrence: { unit: 'day', interval: 2, end: 'count', count: 3, until: null, occurrence: 2, timezone: 'Asia/Shanghai', countdown: true } }
+    getTask.mockResolvedValue(task(value))
+    const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
+    await handleTodoReminder(event() as never)
+    expect(advanceReminderOccurrence).toHaveBeenCalledWith('todo-1', 'r1', 'event-1', expect.objectContaining({ recurrence: expect.objectContaining({ occurrence: 3 }) }), null)
+    expect(sendPushPayload).toHaveBeenCalledWith(expect.objectContaining({ body: '还剩 2 天到期' }))
+  })
+  it('升级前已缓存的失败 Push 结果会重新发送，保留新的成功缓存', async () => {
+    getTask.mockResolvedValue(task())
+    markReminderSent.mockRejectedValueOnce(new Error('storage unavailable')).mockResolvedValue(true)
+    const cached = new Map<string, unknown>([['send-push:event-1', { stale: false, sent: 0, failed: 1, subscriptions: 1 }]])
+    const workloadEvent = event()
+    workloadEvent.step.run = vi.fn(async (key: string, callback: () => unknown) => {
+      if (cached.has(key)) return cached.get(key)
+      const result = await callback()
+      cached.set(key, result)
+      return result
+    })
+    const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
+    await expect(handleTodoReminder(workloadEvent as never)).rejects.toThrow('storage unavailable')
+    await handleTodoReminder(workloadEvent as never)
+    expect(sendPushPayload).toHaveBeenCalledOnce()
+    expect(markReminderSent).toHaveBeenCalledTimes(2)
   })
 })

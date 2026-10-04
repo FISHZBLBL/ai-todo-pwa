@@ -26,6 +26,7 @@ export const parsedReminderSchema = z.object({
 })
 
 export const parsedTaskSchema = z.object({
+  kind: z.literal('task').optional(),
   title: z.string().min(1).max(240),
   dueDate: isoDate.nullable().default(null),
   dateRange: z.object({ start: isoDate, end: isoDate }).nullable().default(null),
@@ -34,5 +35,21 @@ export const parsedTaskSchema = z.object({
   url: z.string().url().nullable().default(null),
   reminders: z.array(parsedReminderSchema).max(8).default([])
 }).refine(value => !(value.dueDate && value.dateRange), 'dueDate 与 dateRange 不能同时存在').refine(value => !value.startTime || Boolean(value.dueDate), '明确时间必须有明确日期').refine(value => !value.endTime || Boolean(value.startTime), '结束时间必须有开始时间')
-export const aiResultSchema = z.object({ tasks: z.array(parsedTaskSchema).min(1).max(50) })
+export const parsedChecklistSchema = z.object({
+  kind: z.literal('checklist'),
+  title: z.string().min(1).max(240),
+  dueDate: z.null().default(null),
+  dateRange: z.null().default(null),
+  startTime: z.null().default(null),
+  endTime: z.null().default(null),
+  url: z.null().default(null),
+  reminders: z.array(parsedReminderSchema).max(0).default([]),
+  sections: z.array(z.object({
+    title: z.string().min(1).max(120),
+    note: z.string().max(2000).nullable().default(null),
+    items: z.array(z.object({ text: z.string().min(1).max(500) })).min(1).max(200)
+  })).min(1).max(30)
+})
+export const parsedInboxItemSchema = z.union([parsedChecklistSchema, parsedTaskSchema])
+export const aiResultSchema = z.object({ tasks: z.array(parsedInboxItemSchema).min(1).max(50) })
 export type AIResult = z.infer<typeof aiResultSchema>

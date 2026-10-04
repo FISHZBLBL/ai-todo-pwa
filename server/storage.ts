@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { z } from 'zod'
@@ -14,11 +14,19 @@ interface PushRecord { endpoint: string; keys?: { auth?: string; p256dh?: string
 interface StoredSettings extends StoredEntity { dailySummaryTime: string; timezone: string; schemaVersion: number }
 export interface DailySummarySchedule { eventId: string; scheduledFor: string; dailySummaryTime: string; timezone: string }
 interface StoredProfile extends StoredEntity { title: string | null; content: string; createdAt: string }
-interface CloudData { tasks: StoredTask[]; drafts: StoredEntity[]; profiles: StoredProfile[]; settings: StoredSettings | null; subscriptions: PushRecord[]; dailySummarySentDates: string[]; dailySummarySchedule: DailySummarySchedule | null; deepseekSecret: EncryptedSecret | null }
+interface DeletionVersion { entity: 'task'|'draft'|'profile'; id: string; updatedAt: string; deletedAt: string }
+interface CloudData { tasks: StoredTask[]; drafts: StoredEntity[]; profiles: StoredProfile[]; settings: StoredSettings | null; subscriptions: PushRecord[]; dailySummarySentDates: string[]; dailySummarySchedule: DailySummarySchedule | null; deepseekSecret: EncryptedSecret | null; deletionVersions: DeletionVersion[] }
 export interface ReminderTransition { todoId: string; oldEventIds: string[] }
 const remindersOf = (task?: StoredTask) => task?.reminders ?? (task?.reminderEnabled && task.reminderAt ? [{ id: 'legacy', at: task.reminderAt, eventId: task.reminderEventId ?? null, sentAt: task.reminderSentAt ?? null, source: task.reminderMode === 'auto' ? 'auto' as const : 'explicit' as const }] : [])
-const empty = (): CloudData => ({ tasks: [], drafts: [], profiles: [], settings: null, subscriptions: [], dailySummarySentDates: [], dailySummarySchedule: null, deepseekSecret: null })
+const empty = (): CloudData => ({ tasks: [], drafts: [], profiles: [], settings: null, subscriptions: [], dailySummarySentDates: [], dailySummarySchedule: null, deepseekSecret: null, deletionVersions: [] })
 let lock = Promise.resolve()
+
+function isNewerTimestamp(incoming: string, current: string) {
+  const incomingTime = Date.parse(incoming), currentTime = Date.parse(current)
+  // Old cloud records can retain an offset while the shared schema emits UTC.
+  // Preserve the old ordering for invalid legacy values instead of dropping them.
+  return Number.isFinite(incomingTime) && Number.isFinite(currentTime) ? incomingTime > currentTime : incoming > current
+}
 
 const cloudDataSchema = z.object({
   tasks: z.array(z.object({ id: z.string(), updatedAt: z.string(), deletedAt: z.string().nullable().optional() }).passthrough()).default([]),
@@ -28,7 +36,8 @@ const cloudDataSchema = z.object({
   subscriptions: z.array(z.object({ endpoint: z.string(), keys: z.object({ auth: z.string().optional(), p256dh: z.string().optional() }).optional(), appUrl: z.string().optional() })).default([]),
   dailySummarySentDates: z.array(z.string()).default([]),
   dailySummarySchedule: z.object({ eventId: z.string(), scheduledFor: z.string().datetime({ offset: true }), dailySummaryTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), timezone: z.string().min(1) }).nullable().default(null),
-  deepseekSecret: z.object({ version: z.literal(1), algorithm: z.literal('aes-256-gcm'), ciphertext: z.string(), iv: z.string(), authTag: z.string(), lastFour: z.string(), createdAt: z.string(), updatedAt: z.string() }).nullable().default(null)
+  deepseekSecret: z.object({ version: z.literal(1), algorithm: z.literal('aes-256-gcm'), ciphertext: z.string(), iv: z.string(), authTag: z.string(), lastFour: z.string(), createdAt: z.string(), updatedAt: z.string() }).nullable().default(null),
+  deletionVersions: z.array(z.object({ entity: z.enum(['task', 'draft', 'profile']), id: z.string(), updatedAt: z.string(), deletedAt: z.string() })).default([])
 })
 
 async function readFileData(): Promise<CloudData> {
@@ -48,8 +57,7 @@ async function withFileLock<T>(fn: () => Promise<T>) {
     try { handle = await open(lockPath, 'wx') }
     catch (error: any) {
       if (error.code !== 'EEXIST') throw error
-      const lockAge = await stat(lockPath).then(value => Date.now() - value.mtimeMs).catch(() => 0)
-      if (lockAge > 30_000) { await unlink(lockPath).catch(() => undefined); continue }
+      // Age is not proof that the previous writer stopped. Never steal a lock.
       if (Date.now() >= deadline) throw new Error('云端数据正忙，请稍后重试')
       await new Promise(resolve => setTimeout(resolve, 50))
     }
@@ -100,41 +108,35 @@ async function mutateCloudbase<T>(fn: (data: CloudData) => T | Promise<T>) {
 }
 
 let cloudbaseStorageApp: Promise<any> | undefined
-let cloudbaseStorageLock = Promise.resolve()
 async function getCloudbaseStorageApp() {
   cloudbaseStorageApp ??= import('@cloudbase/node-sdk').then(cloudbase => cloudbase.init({ env: config.CLOUDBASE_ENV_ID }))
   return cloudbaseStorageApp
 }
 async function cloudbaseStorageFileId(app: any) {
   const metadata = await app.getUploadMetadata({ cloudPath: config.CLOUDBASE_STATE_PATH })
-  return metadata.data.fileId as string
+  const fileId = metadata?.data?.fileId
+  if (typeof fileId !== 'string' || !fileId) throw new Error('CloudBase 存储未返回有效的文件标识')
+  return fileId
 }
+const missingCloudbaseFile = (value: any) => ['NOT_FOUND', 'RESOURCE_NOT_FOUND', 'STORAGE_FILE_NONEXIST', 'STORAGE_RESOURCE_NOT_FOUND', '404'].includes(String(value?.code ?? value?.statusCode ?? ''))
 async function readCloudbaseStorageData(): Promise<CloudData> {
   const app = await getCloudbaseStorageApp()
+  const fileID = await cloudbaseStorageFileId(app)
+  const lookup = await app.getTempFileURL({ fileList: [{ fileID, maxAge: 60 }] })
+  const entry = lookup?.fileList?.[0]
+  if (missingCloudbaseFile(entry)) return empty()
+  if (!entry?.tempFileURL || (entry.code != null && !['SUCCESS', '0'].includes(String(entry.code)))) throw new Error('CloudBase 存储读取失败：无法获取状态文件，请检查权限和文件状态')
   try {
-    const fileID = await cloudbaseStorageFileId(app)
-    const lookup = await app.getTempFileURL({ fileList: [{ fileID, maxAge: 60 }] })
-    if (!lookup.fileList?.[0]?.tempFileURL) return empty()
     const result = await app.downloadFile({ fileID })
-    if (!result.fileContent) return empty()
+    if (result.fileContent == null) throw new Error('CloudBase 存储下载未返回状态文件内容')
     return cloudDataSchema.parse(JSON.parse(Buffer.isBuffer(result.fileContent) ? result.fileContent.toString('utf8') : result.fileContent)) as CloudData
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (/not found|resource.*not.*found|不存在|404/i.test(message)) return empty()
+    if (missingCloudbaseFile(error)) return empty()
     throw error
   }
 }
-async function mutateCloudbaseStorage<T>(fn: (data: CloudData) => T | Promise<T>) {
-  let result!: T
-  const operation = cloudbaseStorageLock.catch(() => undefined).then(async () => {
-    const data = await readCloudbaseStorageData()
-    result = await fn(data)
-    const app = await getCloudbaseStorageApp()
-    await app.uploadFile({ cloudPath: config.CLOUDBASE_STATE_PATH, fileContent: Buffer.from(JSON.stringify(data)) })
-  })
-  cloudbaseStorageLock = operation.then(() => undefined, () => undefined)
-  await operation
-  return result
+async function mutateCloudbaseStorage<T>(_fn: (data: CloudData) => T | Promise<T>): Promise<T> {
+  throw new Error('cloudbase-storage 仅支持只读：对象存储无法保证多实例原子写入，请改用支持事务的 STORAGE_ADAPTER=cloudbase')
 }
 
 let postgresDatabase: Promise<any> | undefined
@@ -164,6 +166,12 @@ async function mutatePostgres<T>(fn: (data: CloudData) => T | Promise<T>) {
     const row = current.data?.[0]
     const data = parsePostgresState(row?.state)
     const result = await fn(data)
+    if (!row) {
+      const inserted = await db.from(config.CLOUDBASE_COLLECTION).insert({ id: config.CLOUDBASE_DOCUMENT_ID, state: data, version: 1, updated_at: new Date().toISOString() })
+      if (!inserted.error) return result
+      if (/^(?:DATABASE_)?23505$/.test(String(inserted.error.code))) continue
+      throw new Error(`CloudBase PostgreSQL 初始化失败：${inserted.error.message ?? String(inserted.error)}`)
+    }
     const version = Number(row?.version ?? 0)
     const updated = await db.from(config.CLOUDBASE_COLLECTION)
       .update({ state: data, version: version + 1, updated_at: new Date().toISOString() })
@@ -187,25 +195,35 @@ async function readCosData(): Promise<CloudData> {
 }
 async function mutateCos<T>(fn: (data: CloudData) => T | Promise<T>) {
   const storage = getCosStorage()
+  await storage.assertSafeLocking()
   const lockKey = `${config.COS_STATE_KEY}.lock`
+  const owner = randomUUID()
   const deadline = Date.now() + 8000
   let acquired = false
   while (!acquired) {
-    acquired = await storage.putText(lockKey, JSON.stringify({ owner: storage.owner, createdAt: new Date().toISOString() }), { forbidOverwrite: true })
+    acquired = await storage.putText(lockKey, JSON.stringify({ owner, acquiredAt: new Date().toISOString() }), { forbidOverwrite: true })
     if (acquired) break
-    const existing = await storage.getText(lockKey).catch(() => null)
-    const createdAt = existing ? Date.parse((JSON.parse(existing) as { createdAt?: string }).createdAt ?? '') : NaN
-    if (Number.isFinite(createdAt) && Date.now() - createdAt > 30_000) await storage.delete(lockKey).catch(() => undefined)
-    if (Date.now() >= deadline) throw new Error('COS 中的 Todo 数据正忙，请稍后重试')
+    if (Date.now() >= deadline) throw new Error('COS 状态文件已被锁定，已停止写入；若上次请求中断，请先停止所有写入，再由管理员恢复锁，或改用支持事务的 cloudbase 存储')
     await new Promise(resolve => setTimeout(resolve, 120))
   }
+  let commitStarted = false
+  let committed = false
   try {
     const data = await readCosData()
     const result = await fn(data)
+    commitStarted = true
     await storage.putText(config.COS_STATE_KEY, JSON.stringify(data))
+    committed = true
     return result
   } finally {
-    await storage.delete(lockKey).catch(() => undefined)
+    // A timed-out PUT may still finish remotely. Releasing its lock would let a
+    // later writer commit first and then be overwritten by that uncertain PUT.
+    if (!commitStarted || committed) {
+      const current = await storage.getText(lockKey).catch(() => null)
+      let owned = false
+      try { owned = Boolean(current && (JSON.parse(current) as { owner?: string }).owner === owner) } catch { /* Unreadable locks stay closed. */ }
+      if (owned) await storage.delete(lockKey).catch(() => undefined)
+    }
   }
 }
 
@@ -239,10 +257,12 @@ export const cloudStore = {
         transitions.set(todoId, events)
       }
       for (const change of changes) {
-        if (change.entity === 'settings') { if (!data.settings || change.value.updatedAt > data.settings.updatedAt) data.settings = change.value as StoredSettings; continue }
+        if (change.entity === 'settings') { if (!data.settings || isNewerTimestamp(change.value.updatedAt, data.settings.updatedAt)) data.settings = change.value as StoredSettings; continue }
+        const deletion = data.deletionVersions.find(item => item.entity === change.entity && item.id === change.value.id)
+        if (deletion && !isNewerTimestamp(change.value.updatedAt, deletion.updatedAt)) continue
         const collection = change.entity === 'task' ? data.tasks : change.entity === 'draft' ? data.drafts : data.profiles
         const index = collection.findIndex(item => item.id === change.value.id)
-        if (index >= 0 && change.value.updatedAt <= collection[index].updatedAt) {
+        if (index >= 0 && !isNewerTimestamp(change.value.updatedAt, collection[index].updatedAt)) {
           if (change.entity === 'task') touch(change.value.id)
           continue
         }
@@ -268,7 +288,7 @@ export const cloudStore = {
           if (index < 0) data.profiles.push(profile); else data.profiles[index] = profile
         }
       }
-      return { tasks: data.tasks, drafts: data.drafts, profiles: data.profiles, settings: data.settings, reminderTransitions: [...transitions].map(([todoId, eventIds]) => ({ todoId, oldEventIds: [...eventIds] })) satisfies ReminderTransition[] }
+      return { tasks: data.tasks, drafts: data.drafts, profiles: data.profiles, settings: data.settings, deletions: data.deletionVersions, reminderTransitions: [...transitions].map(([todoId, eventIds]) => ({ todoId, oldEventIds: [...eventIds] })) satisfies ReminderTransition[] }
     })
   },
   async addSubscription(subscription: PushRecord) { return mutate(data => { const index = data.subscriptions.findIndex(item => item.endpoint === subscription.endpoint); if (index < 0) data.subscriptions.push(subscription); else data.subscriptions[index] = subscription }) },
@@ -285,7 +305,6 @@ export const cloudStore = {
       const reminder = reminders.find(item => item.id === reminderId)
       if (!reminder || reminder.eventId !== eventId || reminder.sentAt || !reminder.recurrence) return false
       if (next) {
-        if (!nextEventId) return false
         reminder.at = next.at
         reminder.recurrence = next.recurrence
         reminder.eventId = nextEventId
@@ -305,9 +324,34 @@ export const cloudStore = {
   },
   async getDailySummaryScheduleState() { const data = await read(); return { settings: data.settings ?? { dailySummaryTime: '08:00', timezone: config.APP_TIMEZONE }, schedule: data.dailySummarySchedule } },
   async setDailySummarySchedule(schedule: DailySummarySchedule | null) { return mutate(data => { data.dailySummarySchedule = schedule }) },
+  async setDailySummaryScheduleIfCurrent(schedule: DailySummarySchedule | null, expectedSchedule: DailySummarySchedule | null, expectedSettings: { dailySummaryTime: string; timezone: string; updatedAt?: string }) {
+    return mutate(data => {
+      const settings = data.settings ?? { dailySummaryTime: '08:00', timezone: config.APP_TIMEZONE }
+      const current = data.dailySummarySchedule
+      if (settings.dailySummaryTime !== expectedSettings.dailySummaryTime || settings.timezone !== expectedSettings.timezone || data.settings?.updatedAt !== expectedSettings.updatedAt) return false
+      if (current?.eventId !== expectedSchedule?.eventId || current?.scheduledFor !== expectedSchedule?.scheduledFor) return false
+      data.dailySummarySchedule = schedule
+      return true
+    })
+  },
   async claimDailySummary(date: string) { return mutate(data => { data.dailySummarySentDates = data.dailySummarySentDates.filter(value => value >= date); if (data.dailySummarySentDates.includes(date)) return false; data.dailySummarySentDates.push(date); return true }) },
   async releaseDailySummary(date: string) { return mutate(data => { data.dailySummarySentDates = data.dailySummarySentDates.filter(value => value !== date) }) },
-  async purgeExpiredTombstones(now = new Date()) { const cutoff = now.getTime() - 30 * 86400000; return mutate(data => { data.tasks = data.tasks.filter(task => !task.deletedAt || Date.parse(task.deletedAt) >= cutoff); data.drafts = data.drafts.filter(draft => !draft.deletedAt || Date.parse(draft.deletedAt) >= cutoff); data.profiles = data.profiles.filter(profile => !profile.deletedAt || Date.parse(profile.deletedAt) >= cutoff) }) },
+  async purgeExpiredTombstones(now = new Date()) {
+    const cutoff = now.getTime() - 30 * 86400000
+    return mutate(data => {
+      const keep = (entity: DeletionVersion['entity'], value: StoredEntity) => {
+        if (!value.deletedAt || Date.parse(value.deletedAt) >= cutoff) return true
+        const index = data.deletionVersions.findIndex(item => item.entity === entity && item.id === value.id)
+        const deletion = { entity, id: value.id, updatedAt: value.updatedAt, deletedAt: value.deletedAt }
+        if (index < 0) data.deletionVersions.push(deletion)
+        else if (isNewerTimestamp(deletion.updatedAt, data.deletionVersions[index].updatedAt)) data.deletionVersions[index] = deletion
+        return false
+      }
+      data.tasks = data.tasks.filter(value => keep('task', value))
+      data.drafts = data.drafts.filter(value => keep('draft', value))
+      data.profiles = data.profiles.filter(value => keep('profile', value))
+    })
+  },
   async getDeepseekSecret() { return (await read()).deepseekSecret },
   async saveDeepseekSecret(secret: EncryptedSecret) { return mutate(data => { data.deepseekSecret = secret }) },
   async deleteDeepseekSecret() { return mutate(data => { data.deepseekSecret = null }) }

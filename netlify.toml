@@ -1,6 +1,9 @@
 [build]
-  command = "pnpm run build"
+  command = "pnpm run typecheck && pnpm run test && pnpm run build"
   publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
 
 [functions]
   directory = "netlify/functions"

@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 
 type PutOptions = { forbidOverwrite?: boolean }
 
@@ -7,7 +7,6 @@ const hmacSha1 = (key: string, value: string) => createHmac('sha1', key).update(
 const encodePath = (key: string) => key.split('/').map(part => encodeURIComponent(part)).join('/')
 
 export class CosObjectStore {
-  readonly owner = randomUUID()
   private readonly host: string
 
   constructor(
@@ -41,7 +40,19 @@ export class CosObjectStore {
     await this.assertOk(response, key)
   }
 
-  private authorization(method: string, pathname: string, headers: Record<string, string>) {
+  // https://cloud.tencent.com/document/product/436/7749 documents
+  // forbid-overwrite, not destination PUT If-Match. Locking additionally requires
+  // never-enabled versioning: https://cloud.tencent.com/document/api/436/19888.
+  async assertSafeLocking(): Promise<void> {
+    const response = await this.request('GET', '', undefined, {}, { versioning: '' })
+    await this.assertOk(response, '(bucket versioning)')
+    const xml = await response.text()
+    if (/<Status(?:\s[^>]*)?(?:>|\/>)/.test(xml)) throw new Error('COS 安全写入需要从未开启版本控制的存储桶；请改用支持事务的 cloudbase 存储')
+    const root = xml.replace(/^\s*<\?xml[^>]*>\s*/, '').trim()
+    if (!/^<VersioningConfiguration(?:\s[^>]*)?\s*(?:\/>|>\s*<\/VersioningConfiguration>)$/.test(root)) throw new Error('无法确认 COS 存储桶的版本控制状态，已停止写入')
+  }
+
+  private authorization(method: string, pathname: string, headers: Record<string, string>, query: Record<string, string>) {
     const now = Math.floor(Date.now() / 1000)
     const keyTime = `${now - 60};${now + 600}`
     const normalizedHeaders = Object.entries(headers)
@@ -49,23 +60,27 @@ export class CosObjectStore {
       .sort(([a], [b]) => a.localeCompare(b))
     const headerList = normalizedHeaders.map(([key]) => key).join(';')
     const httpHeaders = normalizedHeaders.map(([key, value]) => `${encodeURIComponent(key).toLowerCase()}=${encodeURIComponent(value).toLowerCase()}`).join('&')
-    const httpString = `${method.toLowerCase()}\n${pathname}\n\n${httpHeaders}\n`
+    const normalizedQuery = Object.entries(query).sort(([a], [b]) => a.localeCompare(b))
+    const queryList = normalizedQuery.map(([key]) => key.toLowerCase()).join(';')
+    const httpQuery = normalizedQuery.map(([key, value]) => `${encodeURIComponent(key).toLowerCase()}=${encodeURIComponent(value)}`).join('&')
+    const httpString = `${method.toLowerCase()}\n${pathname}\n${httpQuery}\n${httpHeaders}\n`
     const signKey = hmacSha1(this.secretKey, keyTime)
     const signature = hmacSha1(signKey, `sha1\n${keyTime}\n${sha1(httpString)}\n`)
-    return `q-sign-algorithm=sha1&q-ak=${this.secretId}&q-sign-time=${keyTime}&q-key-time=${keyTime}&q-header-list=${headerList}&q-url-param-list=&q-signature=${signature}`
+    return `q-sign-algorithm=sha1&q-ak=${this.secretId}&q-sign-time=${keyTime}&q-key-time=${keyTime}&q-header-list=${headerList}&q-url-param-list=${queryList}&q-signature=${signature}`
   }
 
-  private async request(method: 'GET' | 'PUT' | 'DELETE', key: string, body?: string, extraHeaders: Record<string, string> = {}) {
+  private async request(method: 'GET' | 'PUT' | 'DELETE', key: string, body?: string, extraHeaders: Record<string, string> = {}, query: Record<string, string> = {}) {
     const pathname = `/${encodePath(key)}`
     const signingHeaders = { host: this.host, ...extraHeaders }
     const headers = new Headers(extraHeaders)
-    headers.set('Authorization', this.authorization(method, pathname, signingHeaders))
+    headers.set('Authorization', this.authorization(method, pathname, signingHeaders, query))
     headers.set('Host', this.host)
     if (body !== undefined) headers.set('Content-Type', 'application/json; charset=utf-8')
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 15_000)
     try {
-      return await fetch(`https://${this.host}${pathname}`, { method, headers, body, signal: controller.signal })
+      const search = new URLSearchParams(query).toString()
+      return await fetch(`https://${this.host}${pathname}${search ? `?${search}` : ''}`, { method, headers, body, signal: controller.signal })
     } catch (error) {
       throw new Error(error instanceof Error && error.name === 'AbortError' ? '连接腾讯 COS 超时' : `连接腾讯 COS 失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {

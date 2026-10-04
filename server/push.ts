@@ -17,6 +17,19 @@ function localDate(value: Date, timezone: string) {
   return `${part('year')}-${part('month')}-${part('day')}`
 }
 
+function notificationUrl(path: string, appUrl?: string) {
+  // Current notifications target the app homepage, optionally with a todo
+  // query. Resolve that path inside the subscribed app directory, preserving
+  // deployments such as /repo/ without accepting arbitrary redirect targets.
+  if (!/^\/(?:\?|$)/.test(path)) throw new Error('通知链接必须指向应用首页')
+  if (!appUrl) return path
+  const base = new URL(appUrl)
+  if (!['https:', 'http:'].includes(base.protocol)) throw new Error('应用地址无效')
+  base.search = ''; base.hash = ''
+  if (!base.pathname.endsWith('/')) base.pathname += '/'
+  return new URL(path.slice(1), base).href
+}
+
 export async function sendPushPayload(payload: PushPayload) {
   if (!config.VAPID_PUBLIC_KEY || !config.VAPID_PRIVATE_KEY) throw new Error('VAPID 未配置')
   const data = await cloudStore.read()
@@ -24,8 +37,8 @@ export async function sendPushPayload(payload: PushPayload) {
   let failed = 0
   for (const subscription of data.subscriptions) {
     if (!subscription.keys?.auth || !subscription.keys.p256dh) { failed += 1; continue }
-    const url = subscription.appUrl ? new URL(payload.url, subscription.appUrl).href : payload.url
     try {
+      const url = notificationUrl(payload.url, subscription.appUrl)
       await webpush.sendNotification(subscription as webpush.PushSubscription, JSON.stringify({ ...payload, url }))
       sent += 1
     } catch (error: any) {
@@ -57,7 +70,12 @@ export async function sendDailySummary(now = new Date(), sender: (payload: PushP
   if (!digest) return { date: localDate(now, config.APP_TIMEZONE), sent: 0, skipped: 'empty' as const }
   const { date } = digest
   if (!(await cloudStore.claimDailySummary(date))) return { date, sent: 0, skipped: 'duplicate' as const }
-  const result = await sender({ title: digest.title, body: digest.body, url: '/', tag: `summary-${date}` })
-  if (!result.sent) await cloudStore.releaseDailySummary(date)
-  return { date, ...result, taskCount: digest.taskCount }
+  try {
+    const result = await sender({ title: digest.title, body: digest.body, url: '/', tag: `summary-${date}` })
+    if (!result.sent) await cloudStore.releaseDailySummary(date)
+    return { date, ...result, taskCount: digest.taskCount }
+  } catch (error) {
+    await cloudStore.releaseDailySummary(date)
+    throw error
+  }
 }
