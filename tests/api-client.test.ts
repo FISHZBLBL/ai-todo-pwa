@@ -19,4 +19,15 @@ describe('API base URL', () => {
     await api.health()
     expect(fetch.mock.calls[0][0]).toBe('https://api.example.com/api/health')
   })
+  it('fetches runtime Push configuration through the authenticated API', async () => {
+    vi.stubEnv('VITE_API_URL', '')
+    localStorage.setItem('todo-session', 'test-session')
+    const config = { configured: true, publicKey: 'test-public-key', reason: null, schedulingAvailable: true }
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => config })
+    vi.stubGlobal('fetch', fetch)
+    const { api } = await import('../src/services/api')
+    expect(await api.getPushConfig()).toEqual(config)
+    expect(fetch.mock.calls[0][0]).toBe('/api/push/config')
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer test-session')
+  })
 })

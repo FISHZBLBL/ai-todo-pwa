@@ -92,4 +92,18 @@ describe('每日汇总动态调度', () => {
     await expect(isCurrentDailySummaryEvent('new-event', scheduledFor, { waitForRegistration: true })).rejects.toThrow('每日汇总事件等待登记')
     await expect(isCurrentDailySummaryEvent('new-event', scheduledFor, { waitForRegistration: true })).resolves.toBe(true)
   })
+  it('首次订阅即刻恢复到期旧汇总，但不重建未来事件', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    const overdue = { eventId: 'old-event', scheduledFor: '2026-10-12T00:00:00.000Z', ...settings }
+    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'new-event' })) }
+    const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
+    const now = new Date('2026-10-12T00:05:00.000Z')
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule: overdue })
+    await ensureDailySummarySchedule(sender, now, { recoverOverdueAfterMs: 0 })
+    expect(sender.send).toHaveBeenCalledWith('daily.summary', { data: { scheduledFor: now.toISOString() }, delayUntil: now.getTime() + 60_000 })
+    sender.send.mockClear()
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule: { ...overdue, scheduledFor: '2026-10-13T00:00:00.000Z' } })
+    await ensureDailySummarySchedule(sender, now, { recoverOverdueAfterMs: 0 })
+    expect(sender.send).not.toHaveBeenCalled()
+  })
 })

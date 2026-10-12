@@ -291,11 +291,46 @@ export const cloudStore = {
       return { tasks: data.tasks, drafts: data.drafts, profiles: data.profiles, settings: data.settings, deletions: data.deletionVersions, reminderTransitions: [...transitions].map(([todoId, eventIds]) => ({ todoId, oldEventIds: [...eventIds] })) satisfies ReminderTransition[] }
     })
   },
-  async addSubscription(subscription: PushRecord) { return mutate(data => { const index = data.subscriptions.findIndex(item => item.endpoint === subscription.endpoint); if (index < 0) data.subscriptions.push(subscription); else data.subscriptions[index] = subscription }) },
+  async addSubscription(subscription: PushRecord, now = Date.now()) {
+    return mutate(data => {
+      const firstSubscription = data.subscriptions.length === 0
+      const index = data.subscriptions.findIndex(item => item.endpoint === subscription.endpoint)
+      if (index < 0) data.subscriptions.push(subscription); else data.subscriptions[index] = subscription
+      const reminderTransitions: ReminderTransition[] = []
+      if (firstSubscription) {
+        for (const task of data.tasks) {
+          if (task.completed || task.deletedAt) continue
+          const oldEventIds = new Set<string>()
+          let recover = false
+          for (const reminder of remindersOf(task)) {
+            const at = Date.parse(reminder.at)
+            if (reminder.sentAt || !Number.isFinite(at) || at > now) continue
+            recover = true
+            if (reminder.eventId) oldEventIds.add(reminder.eventId)
+            reminder.eventId = null
+            if (!task.reminders) task.reminderEventId = null
+          }
+          if (recover) reminderTransitions.push({ todoId: task.id, oldEventIds: [...oldEventIds] })
+        }
+      }
+      return { reminderTransitions, firstSubscription }
+    })
+  },
   async removeSubscription(endpoint: string) { return mutate(data => { data.subscriptions = data.subscriptions.filter(item => item.endpoint !== endpoint) }) },
   async hasSubscription(endpoint: string) { return (await read()).subscriptions.some(item => item.endpoint === endpoint) },
   async getTask(todoId: string) { return (await read()).tasks.find(task => task.id === todoId) ?? null },
   async setReminderEvent(todoId: string, reminderIdOrAt: string, atOrEventId: string, eventId?: string) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task) return false; if (!eventId) { if (!task.reminderEnabled || task.reminderAt !== reminderIdOrAt || task.completed || task.deletedAt || task.reminderEventId) return false; task.reminderEventId = atOrEventId; task.reminderSentAt = null; return true } const reminder = remindersOf(task).find(item => item.id === reminderIdOrAt); if (!reminder || reminder.at !== atOrEventId || task.completed || task.deletedAt || reminder.eventId) return false; reminder.eventId = eventId; reminder.sentAt = null; task.reminders = remindersOf(task); return true }) },
+  async clearReminderEventIfCurrent(todoId: string, reminderId: string, eventId: string) {
+    return mutate(data => {
+      const task = data.tasks.find(item => item.id === todoId)
+      if (!task || task.completed || task.deletedAt) return false
+      const reminder = remindersOf(task).find(item => item.id === reminderId)
+      if (!reminder || reminder.eventId !== eventId || reminder.sentAt) return false
+      reminder.eventId = null
+      if (!task.reminders) task.reminderEventId = null
+      return true
+    })
+  },
   async markReminderSent(todoId: string, reminderIdOrEventId: string, eventIdOrSentAt?: string, sentAt = new Date().toISOString()) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task) return false; if (!eventIdOrSentAt) { if (!task.reminderEnabled || task.reminderEventId !== reminderIdOrEventId || task.reminderSentAt) return false; task.reminderSentAt = sentAt; return true } const reminder = remindersOf(task).find(item => item.id === reminderIdOrEventId); if (!reminder || reminder.eventId !== eventIdOrSentAt || reminder.sentAt) return false; reminder.sentAt = sentAt; task.reminders = remindersOf(task); return true }) },
   async advanceReminderOccurrence(todoId: string, reminderId: string, eventId: string, next: { at: string; recurrence: StoredRecurrence } | null, nextEventId: string | null, sentAt = new Date().toISOString()) {
     return mutate(data => {

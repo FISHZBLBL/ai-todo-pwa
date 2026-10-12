@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ read: vi.fn(), removeSubscription: vi.fn(), sendNotification: vi.fn(), setVapidDetails: vi.fn() }))
 vi.mock('../server/storage', () => ({ cloudStore: { read: mocks.read, removeSubscription: mocks.removeSubscription } }))
-vi.mock('../server/config', () => ({ config: { VAPID_PUBLIC_KEY: 'test-public', VAPID_PRIVATE_KEY: 'test-private', VAPID_SUBJECT: 'mailto:test@example.com' } }))
+vi.mock('../server/config', async () => {
+  const { createECDH } = await import('node:crypto')
+  const scalar = Buffer.alloc(32); scalar[31] = 1
+  const curve = createECDH('prime256v1'); curve.setPrivateKey(scalar)
+  return { config: { VAPID_PUBLIC_KEY: curve.getPublicKey().toString('base64url'), VAPID_PRIVATE_KEY: Buffer.concat([Buffer.alloc(32 - curve.getPrivateKey().length), curve.getPrivateKey()]).toString('base64url'), VAPID_SUBJECT: 'mailto:test@example.com' } }
+})
 vi.mock('web-push', () => ({ default: { sendNotification: mocks.sendNotification, setVapidDetails: mocks.setVapidDetails } }))
 
 describe('实际 Push payload 的应用子目录链接', () => {

@@ -50,8 +50,8 @@ export async function reconcileReminder(transition: ReminderTransition, sender: 
   return legacy && created.length === 1 ? { eventId: created[0] } : { eventIds: created }
 }
 
-export async function reconcileReminderTransitions(transitions: ReminderTransition[], sender?: AsyncEventSender) {
+export async function reconcileReminderTransitions(transitions: ReminderTransition[], sender?: AsyncEventSender, options: ReconcileOptions = {}) {
   if (!transitions.length) return
   const client = sender ?? defaultSender()
-  for (const transition of transitions) await reconcileReminder(transition, client)
+  for (const transition of transitions) await reconcileReminder(transition, client, Date.now(), options)
 }

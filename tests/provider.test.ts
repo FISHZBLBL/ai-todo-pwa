@@ -1,9 +1,15 @@
+/* @vitest-environment node */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const { getDeepseekSecret } = vi.hoisted(() => ({ getDeepseekSecret: vi.fn() }))
+// Provider tests own the HTTP seam. Storage credentials injected by a build
+// environment must never turn their mocked AI fetch into a cloud-state request.
+vi.mock('../server/storage', () => ({ cloudStore: { getDeepseekSecret } }))
 
 const context = { content: '明天下午三点测器件', currentLocalDateTime: '2026-08-27T10:00:00+08:00', timezone: 'Asia/Shanghai', locale: 'zh-CN' }
 describe('AI Provider 输出与重试策略', () => {
-  beforeEach(() => { vi.resetModules(); process.env.AI_API_KEY = 'test-only'; process.env.AI_BASE_URL = 'https://ai.example.com'; process.env.AI_MODEL = 'test-model' })
-  afterEach(() => { vi.restoreAllMocks(); delete process.env.AI_API_KEY; delete process.env.AI_BASE_URL; delete process.env.AI_MODEL })
+  beforeEach(() => { vi.resetModules(); getDeepseekSecret.mockReset(); getDeepseekSecret.mockResolvedValue(null); vi.stubEnv('AI_API_KEY', 'test-only'); vi.stubEnv('AI_BASE_URL', 'https://ai.example.com'); vi.stubEnv('AI_MODEL', 'test-model') })
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs() })
 
   it('正常解析只请求一次，并接受安全 normalization', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify([{ title:'测器件', dueDate:'2026-08-28', startTime:'15:00' }]) } }] }) })
@@ -11,6 +17,8 @@ describe('AI Provider 输出与重试策略', () => {
     const { parseWithRetry } = await import('../server/ai/provider')
     await expect(parseWithRetry(context)).resolves.toMatchObject({ tasks: [{ title: '测器件', dateRange: null, reminders: [] }] })
     expect(fetchMock).toHaveBeenCalledOnce()
+    expect(getDeepseekSecret).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls[0][0]).toBe('https://ai.example.com/v1/chat/completions')
     const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body)
     expect(firstBody.messages[1].content).toBe(JSON.stringify(context))
     expect(firstBody.response_format).toEqual({ type: 'json_object' })
@@ -74,5 +82,20 @@ describe('AI Provider 输出与重试策略', () => {
     const { parseWithRetry } = await import('../server/ai/provider')
     await expect(parseWithRetry(context)).rejects.toThrow('offline')
     expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('构建环境配置 COS 时仍只请求被模拟的 AI 服务', async () => {
+    vi.stubEnv('STORAGE_ADAPTER', 'cos')
+    vi.stubEnv('COS_BUCKET', 'test-fixture-1234567890')
+    vi.stubEnv('COS_REGION', 'ap-shanghai')
+    vi.stubEnv('COS_SECRET_ID', 'test-fixture-id')
+    vi.stubEnv('COS_SECRET_KEY', 'test-fixture-private-value')
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ tasks: [{ title: '测试任务' }] }) } }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const { parseWithRetry } = await import('../server/ai/provider')
+    await expect(parseWithRetry(context)).resolves.toMatchObject({ tasks: [{ title: '测试任务' }] })
+    expect(getDeepseekSecret).toHaveBeenCalledOnce()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls[0][0]).toBe('https://ai.example.com/v1/chat/completions')
   })
 })

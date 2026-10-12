@@ -1,9 +1,18 @@
 import webpush from 'web-push'
 import { config } from './config.js'
 import { cloudStore } from './storage.js'
+import { getWebPushConfig, type WebPushConfigReason } from './pushConfig.js'
 
-if (config.VAPID_PUBLIC_KEY && config.VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(config.VAPID_SUBJECT, config.VAPID_PUBLIC_KEY, config.VAPID_PRIVATE_KEY)
+const webPushConfig = getWebPushConfig()
+if (webPushConfig.configured) {
+  webpush.setVapidDetails(config.VAPID_SUBJECT, webPushConfig.publicKey!, Buffer.from(config.VAPID_PRIVATE_KEY!.trim(), 'base64url').toString('base64url'))
+}
+
+const webPushConfigErrors: Record<WebPushConfigReason, string> = {
+  missing_public_key: 'VAPID 未配置：缺少公钥',
+  missing_private_key: 'VAPID 未配置：缺少私钥',
+  invalid_keys: 'VAPID 配置无效：请检查公私钥格式',
+  key_mismatch: 'VAPID 公私钥不匹配：请使用同一组密钥'
 }
 
 export interface PushPayload { title: string; body: string; url: string; tag: string }
@@ -31,7 +40,8 @@ function notificationUrl(path: string, appUrl?: string) {
 }
 
 export async function sendPushPayload(payload: PushPayload) {
-  if (!config.VAPID_PUBLIC_KEY || !config.VAPID_PRIVATE_KEY) throw new Error('VAPID 未配置')
+  const runtimeConfig = getWebPushConfig()
+  if (!runtimeConfig.configured) throw new Error(webPushConfigErrors[runtimeConfig.reason ?? 'invalid_keys'])
   const data = await cloudStore.read()
   let sent = 0
   let failed = 0

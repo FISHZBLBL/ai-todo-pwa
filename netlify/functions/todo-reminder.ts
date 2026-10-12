@@ -35,7 +35,10 @@ export async function handleTodoReminder(event: AsyncWorkloadEvent<TodoReminderE
     const pushed = await sendPushPayload({ title: current!.title ?? '任务提醒', body: recurringReminderBody(current!.title ?? '任务提醒', currentReminder), url: `/?todo=${encodeURIComponent(todoId)}`, tag: `todo-${todoId}-${event.eventId}` })
     // A returned value is cached by step.run. Failed deliveries must throw inside
     // the callback so a later attempt actually contacts the push service again.
-    if (!pushed.sent && !pushed.subscriptions) throw new ErrorDoNotRetry('没有可用的 Push Subscription')
+    if (!pushed.sent && !pushed.subscriptions) {
+      await cloudStore.clearReminderEventIfCurrent(todoId, reminderId, event.eventId)
+      throw new ErrorDoNotRetry('没有可用的 Push Subscription，等待设备订阅后重新安排')
+    }
     if (!pushed.sent) throw new ErrorRetryAfterDelay({ message: 'Web Push 发送失败', retryDelay: '1m' })
     return { stale: false as const, ...pushed }
   }

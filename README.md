@@ -98,7 +98,7 @@ pnpm run dev
 | `AWL_API_KEY` | Netlify Async Workloads API Key，在项目或团队 Extension 设置中配置 |
 | `APP_TIMEZONE` | 服务端提醒计算时区，默认 `Asia/Shanghai` |
 | `VITE_API_URL` | 公开 API 根地址，如 `https://api.example.com/api` |
-| `VITE_VAPID_PUBLIC_KEY` | 可公开的 VAPID public key |
+| `VITE_VAPID_PUBLIC_KEY` | 旧版前端构建变量；新版从认证 `/api/push/config` 读取当前公钥，无需设置 |
 
 生成密码哈希、JWT 签名密钥和 VAPID 密钥：
 
@@ -172,7 +172,9 @@ CREATE TABLE public.ai_todo_state (
 
 ## Web Push
 
-用户在设置页主动授权。每台设备会保存一条独立 subscription，并可独立取消。浏览器显示“已订阅”前会核验服务端记录，VAPID 公钥变化时会重新订阅；410/404 的失效 subscription 会被清理。
+用户在设置页主动授权。前端从认证 `/api/push/config` 读取当前公钥和调度状态；服务端验证 P-256 公私钥匹配，仅返回公钥，私钥保持在 Functions 环境变量中。修改 Functions 配置后必须重新部署，GitHub 代码更新与线上部署成功需要分别确认。
+
+每台设备会保存一条独立 subscription，并可独立取消。浏览器显示“已订阅”前会核验服务端记录，VAPID 公钥变化时用户再次开启通知会重建订阅；410/404 的失效 subscription 会被清理。无订阅时到期的提醒会解除事件指针并等待订阅；首个设备订阅后补排未发送的到期提醒，未来与已发送提醒保留。维护函数在没有订阅时不反复创建事件。
 
 任务安排使用 `dueDate/dateRange/startTime/endTime`；提醒独立使用 `reminderMode` 与 `reminders[]`。每条提醒有自己的 ID、时间、事件 ID 和发送状态，可按天或周重复，按次数或截止日期结束。倒计时包含重复间隔。Workload 发送前重新核对任务与事件，失败在步骤内部抛错以允许真正重试；成功后推进下一次，由维护函数创建新的根事件。
 

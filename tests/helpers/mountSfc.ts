@@ -6,7 +6,7 @@ import * as Vue from 'vue'
 import * as limits from '../../shared/limits'
 
 /** Compile the real SFC in tests without changing the production Vite config. */
-export function mountSfc(file: string, modules: Record<string, unknown>, props: Record<string, unknown> = {}, expose: string[] = []) {
+export function mountSfc(file: string, modules: Record<string, unknown>, props: Record<string, unknown> = {}, expose: string[] = [], env: Record<string, unknown> = { BASE_URL: '/' }) {
   const source = readFileSync(resolve(file), 'utf8').replace('</script>', `defineExpose({ ${expose.join(', ')} })\n</script>`)
   const script = compileScript(parse(source, { filename: file }).descriptor, { id: `test-${file}`, inlineTemplate: true })
   const code = ts.transpileModule(script.content, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText
@@ -22,7 +22,7 @@ export function mountSfc(file: string, modules: Record<string, unknown>, props: 
     if (name in modules) return modules[name]
     throw new Error(`Missing SFC dependency: ${name}`)
   }
-  new Function('require', 'exports', code)(require, exports)
+  new Function('require', 'exports', '__testImportMeta', code.replaceAll('import.meta', '__testImportMeta'))(require, exports, { env })
   const container = document.createElement('div')
   document.body.append(container)
   const app = Vue.createApp(exports.default!, props)

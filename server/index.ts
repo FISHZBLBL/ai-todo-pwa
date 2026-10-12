@@ -13,6 +13,7 @@ import { ensureDailySummarySchedule } from './reminders/dailySummaryScheduler.js
 import { rateLimitKey } from './rate-limit.js'
 import { clockTimeSchema, syncChangeSchema } from '../shared/syncSchema.js'
 import { MAX_SYNC_CHANGES } from '../shared/limits.js'
+import { getWebPushConfig } from './pushConfig.js'
 
 export const app = express()
 app.set('trust proxy', false); app.use(helmet()); app.use(cors({ origin: config.CORS_ORIGIN.split(',').map(v => v.trim()) })); app.use(express.json({ limit: '256kb' }))
@@ -50,7 +51,24 @@ app.post('/api/sync', requireAuth, async (req, res) => {
     res.json({ ...response, reminderSchedulingPending })
   } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : '云端同步失败' }) }
 })
-app.post('/api/push/subscribe', requireAuth, async (req, res) => { const input = z.object({ endpoint: z.string().url(), keys: z.object({ auth: z.string(), p256dh: z.string() }), appUrl: z.string().url() }).safeParse(req.body); if (!input.success) return res.status(400).json({ error: 'Push Subscription 无效' }); await cloudStore.addSubscription(input.data); res.status(200).json({ ok: true }) })
+app.get('/api/push/config', requireAuth, (_req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store')
+  res.json({ ...getWebPushConfig(), schedulingAvailable: isReminderSchedulingAvailable() })
+})
+app.post('/api/push/subscribe', requireAuth, async (req, res) => {
+  const input = z.object({ endpoint: z.string().url(), keys: z.object({ auth: z.string(), p256dh: z.string() }), appUrl: z.string().url() }).safeParse(req.body)
+  if (!input.success) return res.status(400).json({ error: 'Push Subscription 无效' })
+  const saved = await cloudStore.addSubscription(input.data)
+  let reminderSchedulingPending = false
+  if (isReminderSchedulingAvailable()) {
+    try {
+      await reconcileReminderTransitions(saved?.reminderTransitions ?? [], undefined, { includeOverdue: true })
+      if (saved?.firstSubscription) await ensureDailySummarySchedule(undefined, new Date(), { recoverOverdueAfterMs: 0 })
+      else await ensureDailySummarySchedule()
+    } catch { reminderSchedulingPending = true }
+  }
+  res.status(200).json({ ok: true, reminderSchedulingPending })
+})
 app.get('/api/push/subscription', requireAuth, async (req, res) => { const endpoint = z.string().url().safeParse(req.query.endpoint); if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' }); res.json({ registered: await cloudStore.hasSubscription(endpoint.data) }) })
 app.delete('/api/push/subscribe', requireAuth, async (req, res) => { const endpoint = z.string().url().safeParse(req.body?.endpoint); if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' }); await cloudStore.removeSubscription(endpoint.data); res.status(200).json({ ok: true }) })
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))

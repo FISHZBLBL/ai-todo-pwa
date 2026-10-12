@@ -90,4 +90,15 @@ describe('独立提醒定时维护', () => {
     await maintainReminderSchedules(sender, new Date('2026-10-04T00:05:00.000Z'))
     expect(setReminderEvent).toHaveBeenCalledWith('todo-1', 'r1', task.reminders[0].at, 'recovered')
   })
+  it('首次订阅后的旧版单条提醒调度失败，后续维护仍可补排', async () => {
+    const task = { id: 'legacy-todo', completed: false, deletedAt: null, reminderEnabled: true, reminderAt: '2026-10-12T00:00:00.000Z', reminderEventId: null, reminderSentAt: null }
+    read.mockResolvedValue({ tasks: [task], subscriptions: [{ endpoint: 'https://push.example.test/synthetic' }] })
+    getTask.mockResolvedValue(task)
+    setReminderEvent.mockResolvedValue(true)
+    const sender = { send: vi.fn().mockResolvedValueOnce({ sendStatus: 'failed', eventId: 'failed' }).mockResolvedValue({ sendStatus: 'succeeded', eventId: 'recovered' }) }
+    const { maintainReminderSchedules } = await import('../server/reminders/maintenance')
+    await expect(maintainReminderSchedules(sender, new Date('2026-10-12T00:05:00.000Z'))).rejects.toThrow('部分提醒调度失败')
+    await maintainReminderSchedules(sender, new Date('2026-10-12T00:10:00.000Z'))
+    expect(setReminderEvent).toHaveBeenCalledWith(task.id, task.reminderAt, 'recovered')
+  })
 })

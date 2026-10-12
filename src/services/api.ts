@@ -9,6 +9,13 @@ export interface SyncResponse {
   reminderSchedulingPending?: boolean
 }
 
+export interface PushConfig {
+  configured: boolean
+  publicKey: string | null
+  reason: null | 'missing_public_key' | 'missing_private_key' | 'invalid_keys' | 'key_mismatch'
+  schedulingAvailable: boolean
+}
+
 const base = (import.meta.env.VITE_API_URL?.trim() || '/api').replace(/\/+$/, '')
 const tokenKey = 'todo-session'
 export const authExpiredEvent = 'todo-auth-expired'
@@ -45,6 +52,7 @@ export const api = {
   getDeepseekSettings() { return request<{ deepseek: { configured: boolean; maskedKey: string | null; updatedAt: string | null } }>('/ai-settings/deepseek') },
   saveDeepseekKey(apiKey: string) { return request<{ deepseek: { configured: boolean; maskedKey: string | null; updatedAt: string | null } }>('/ai-settings/deepseek', { method: 'PUT', body: JSON.stringify({ apiKey }) }) },
   deleteDeepseekKey() { return request<{ deepseek: { configured: boolean; maskedKey: string | null; updatedAt: string | null } }>('/ai-settings/deepseek', { method: 'DELETE' }) },
+  getPushConfig() { return request<PushConfig>('/push/config') },
   savePush(subscription: PushSubscriptionJSON & { appUrl: string }) { return request('/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) }) },
   pushStatus(endpoint: string) { return request<{ registered: boolean }>(`/push/subscription?endpoint=${encodeURIComponent(endpoint)}`) },
   deletePush(endpoint: string) { return request('/push/subscribe', { method: 'DELETE', body: JSON.stringify({ endpoint }) }) }
