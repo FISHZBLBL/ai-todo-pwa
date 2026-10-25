@@ -149,7 +149,7 @@ describe('独立提醒定时维护', () => {
     getTask.mockImplementation(async () => structuredClone(task))
     clearReminderEventIfCurrent.mockImplementation(async (_todoId, reminderId, eventId) => {
       const reminder = task.reminders.find(item => item.id === reminderId)
-      if (reminder?.eventId !== eventId) return false
+      if (!reminder || reminder.eventId !== eventId) return false
       reminder.eventId = null
       return true
     })
