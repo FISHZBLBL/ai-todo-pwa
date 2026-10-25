@@ -35,11 +35,19 @@ app.post('/api/sync', requireAuth, async (req, res) => {
   const input = z.object({ changes: z.array(syncChangeSchema).max(MAX_SYNC_CHANGES) }).safeParse(req.body)
   if (!input.success) return res.status(400).json({ error: '同步数据无效' })
   try {
-    const merged = await cloudStore.merge(input.data.changes)
+    let merged: Awaited<ReturnType<typeof cloudStore.merge>>
+    if (input.data.changes.length) merged = await cloudStore.merge(input.data.changes)
+    else {
+      // Polling clients only need a snapshot. Avoid taking a write lock and
+      // rewriting the entire cloud object when there is nothing to merge.
+      const data = await cloudStore.read()
+      merged = { tasks: data.tasks, drafts: data.drafts, profiles: data.profiles, settings: data.settings, deletions: data.deletionVersions, reminderTransitions: [] }
+    }
     let reminderSchedulingPending = false
-    if (isReminderSchedulingAvailable()) {
+    const schedulesChanged = input.data.changes.some(change => change.entity === 'task' || change.entity === 'settings')
+    if (schedulesChanged && isReminderSchedulingAvailable()) {
       try {
-        await reconcileReminderTransitions(merged.reminderTransitions)
+        if (merged.reminderTransitions.length) await reconcileReminderTransitions(merged.reminderTransitions)
         await ensureDailySummarySchedule()
       } catch {
         // The independent maintenance function retries scheduling. The cloud

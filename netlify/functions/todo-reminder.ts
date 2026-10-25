@@ -1,8 +1,9 @@
 import { asyncWorkloadFn, ErrorDoNotRetry, ErrorRetryAfterDelay, type AsyncWorkloadConfig, type AsyncWorkloadEvent, type CustomAsyncWorkloadEvent } from '@netlify/async-workloads'
 import { cloudStore } from '../../server/storage.js'
 import { sendPushPayload } from '../../server/push.js'
-import { TODO_REMINDER_EVENT } from '../../server/reminders/scheduler.js'
+import { cancelReminderEvents, TODO_REMINDER_EVENT } from '../../server/reminders/scheduler.js'
 import { nextRecurringOccurrence, recurringReminderBody } from '../../server/reminders/recurrence.js'
+import { createRootEventSender } from '../../server/reminders/rootEventSender.js'
 
 interface TodoReminderEvent extends CustomAsyncWorkloadEvent {
   eventName: typeof TODO_REMINDER_EVENT
@@ -56,9 +57,32 @@ export async function handleTodoReminder(event: AsyncWorkloadEvent<TodoReminderE
     return
   }
   const next = nextRecurringOccurrence(currentReminder)
-  // The independent maintenance schedule creates the next root event. Sending it
-  // from this workload would grow the SDK's event chain until the chain limit.
-  await event.step.run(`advance-reminder:${event.eventId}`, () => cloudStore.advanceReminderOccurrence(todoId, reminderId, event.eventId, next, null))
+  let nextEventId: string | null = null
+  if (next) {
+    try {
+      nextEventId = await event.step.run(`schedule-next-root:${event.eventId}`, async () => {
+        const scheduled = await createRootEventSender().send(TODO_REMINDER_EVENT, { data: { todoId, reminderId }, delayUntil: Date.parse(next.at) })
+        if (scheduled.sendStatus !== 'succeeded') throw new Error('创建后续提醒事件失败')
+        return scheduled.eventId
+      })
+    } catch {
+      // This occurrence was delivered successfully. Leave the next occurrence
+      // unbound for maintenance instead of stranding the delivered old event
+      // after SDK retries are exhausted. Storage failures still retry with the
+      // successful push cached above.
+      await event.step.run(`advance-pending-reminder:${event.eventId}`, () => cloudStore.advanceReminderOccurrence(todoId, reminderId, event.eventId, next, null))
+      console.warn('后续提醒安排失败，将由维护任务恢复')
+      return
+    }
+  }
+  // Keep the current event registered until its successor exists. A retry reuses
+  // the cached event ID and successful delivery instead of sending either again.
+  const advanced = await event.step.run(`advance-reminder-v2:${event.eventId}`, () => cloudStore.advanceReminderOccurrence(todoId, reminderId, event.eventId, next, nextEventId))
+  if (!advanced && nextEventId) {
+    const latest = await cloudStore.getTask(todoId)
+    // Another attempt may have published this same cached successor already.
+    if (reminderFor(latest, reminderId)?.eventId !== nextEventId) await cancelReminderEvents([nextEventId])
+  }
 }
 
 export default asyncWorkloadFn<TodoReminderEvent>(handleTodoReminder)

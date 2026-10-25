@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const isCurrentDailySummaryEvent = vi.fn()
-const completeDailySummaryEvent = vi.fn()
+const ensureDailySummarySchedule = vi.fn()
 const sendDailySummary = vi.fn()
-vi.mock('../server/reminders/dailySummaryScheduler', () => ({ DAILY_SUMMARY_EVENT: 'daily.summary', isCurrentDailySummaryEvent, completeDailySummaryEvent }))
+vi.mock('../server/reminders/dailySummaryScheduler', () => ({ DAILY_SUMMARY_EVENT: 'daily.summary', isCurrentDailySummaryEvent, ensureDailySummarySchedule }))
 vi.mock('../server/push', () => ({ sendDailySummary }))
 
 function event(eventId = 'summary-event') {
@@ -14,9 +14,9 @@ function event(eventId = 'summary-event') {
 }
 
 describe('每日汇总 workload', () => {
-  beforeEach(() => { isCurrentDailySummaryEvent.mockReset(); completeDailySummaryEvent.mockReset(); sendDailySummary.mockReset() })
+  beforeEach(() => { isCurrentDailySummaryEvent.mockReset(); ensureDailySummarySchedule.mockReset(); sendDailySummary.mockReset() })
 
-  it('当前事件发送后释放调度指针，由独立定时任务安排下一天', async () => {
+  it('当前事件发送后直接续排下一天，无需等待维护扫描', async () => {
     isCurrentDailySummaryEvent.mockResolvedValue(true)
     sendDailySummary.mockResolvedValue({ sent: 1, failed: 0, subscriptions: 1 })
     const { handleDailySummary } = await import('../netlify/functions/daily-summary')
@@ -24,7 +24,7 @@ describe('每日汇总 workload', () => {
     await handleDailySummary(workloadEvent)
     expect(sendDailySummary).toHaveBeenCalledOnce()
     expect(sendDailySummary).toHaveBeenCalledWith(new Date(workloadEvent.eventData.scheduledFor))
-    expect(completeDailySummaryEvent).toHaveBeenCalledWith('summary-event', workloadEvent.eventData.scheduledFor)
+    expect(ensureDailySummarySchedule).toHaveBeenCalledWith(expect.objectContaining({ send: expect.any(Function) }), expect.any(Date), { skipCancellationForEventId: 'summary-event' })
   })
 
   it('旧 daily event 到达时既不发送也不续排', async () => {
@@ -32,7 +32,7 @@ describe('每日汇总 workload', () => {
     const { handleDailySummary } = await import('../netlify/functions/daily-summary')
     await handleDailySummary(event('old-event'))
     expect(sendDailySummary).not.toHaveBeenCalled()
-    expect(completeDailySummaryEvent).not.toHaveBeenCalled()
+    expect(ensureDailySummarySchedule).not.toHaveBeenCalled()
   })
   it('全量发送失败保留当前事件，并在下一次尝试重新发送', async () => {
     isCurrentDailySummaryEvent.mockResolvedValue(true)
@@ -47,17 +47,17 @@ describe('每日汇总 workload', () => {
     })
     const { handleDailySummary } = await import('../netlify/functions/daily-summary')
     await expect(handleDailySummary(workloadEvent)).rejects.toThrow('每日汇总发送失败')
-    expect(completeDailySummaryEvent).not.toHaveBeenCalled()
+    expect(ensureDailySummarySchedule).not.toHaveBeenCalled()
     await handleDailySummary(workloadEvent)
     expect(sendDailySummary).toHaveBeenCalledTimes(2)
-    expect(completeDailySummaryEvent).toHaveBeenCalledOnce()
+    expect(ensureDailySummarySchedule).toHaveBeenCalledOnce()
   })
-  it('无任务或当天已发送时正常释放事件', async () => {
+  it('无任务或当天已发送时仍安排下一天', async () => {
     isCurrentDailySummaryEvent.mockResolvedValue(true)
     sendDailySummary.mockResolvedValue({ date: '2026-10-04', sent: 0, skipped: 'empty' })
     const { handleDailySummary } = await import('../netlify/functions/daily-summary')
     await handleDailySummary(event())
-    expect(completeDailySummaryEvent).toHaveBeenCalledOnce()
+    expect(ensureDailySummarySchedule).toHaveBeenCalledOnce()
   })
   it('升级前已缓存的失败汇总会真正重试发送', async () => {
     isCurrentDailySummaryEvent.mockResolvedValue(true)
@@ -73,6 +73,24 @@ describe('每日汇总 workload', () => {
     const { handleDailySummary } = await import('../netlify/functions/daily-summary')
     await handleDailySummary(workloadEvent)
     expect(sendDailySummary).toHaveBeenCalledOnce()
-    expect(completeDailySummaryEvent).toHaveBeenCalledOnce()
+    expect(ensureDailySummarySchedule).toHaveBeenCalledOnce()
+  })
+  it('续排失败重试时不会重复发送已经成功的每日汇总', async () => {
+    isCurrentDailySummaryEvent.mockResolvedValue(true)
+    sendDailySummary.mockResolvedValue({ sent: 1, failed: 0, subscriptions: 1 })
+    ensureDailySummarySchedule.mockRejectedValueOnce(new Error('schedule unavailable')).mockResolvedValue({ scheduled: true })
+    const workloadEvent = event()
+    const cache = new Map<string, unknown>()
+    workloadEvent.step.run = vi.fn(async (key: string, callback: () => unknown) => {
+      if (cache.has(key)) return cache.get(key)
+      const result = await callback()
+      cache.set(key, result)
+      return result
+    })
+    const { handleDailySummary } = await import('../netlify/functions/daily-summary')
+    await expect(handleDailySummary(workloadEvent)).rejects.toThrow('schedule unavailable')
+    await handleDailySummary(workloadEvent)
+    expect(sendDailySummary).toHaveBeenCalledOnce()
+    expect(ensureDailySummarySchedule).toHaveBeenCalledTimes(2)
   })
 })

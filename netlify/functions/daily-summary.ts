@@ -1,6 +1,7 @@
-import { asyncWorkloadFn, ErrorRetryAfterDelay, type AsyncWorkloadConfig, type AsyncWorkloadEvent, type CustomAsyncWorkloadEvent } from '@netlify/async-workloads'
+import { AsyncWorkloadsClient, asyncWorkloadFn, ErrorRetryAfterDelay, type AsyncWorkloadConfig, type AsyncWorkloadEvent, type CustomAsyncWorkloadEvent } from '@netlify/async-workloads'
 import { sendDailySummary } from '../../server/push.js'
-import { completeDailySummaryEvent, isCurrentDailySummaryEvent, DAILY_SUMMARY_EVENT } from '../../server/reminders/dailySummaryScheduler.js'
+import { ensureDailySummarySchedule, isCurrentDailySummaryEvent, DAILY_SUMMARY_EVENT } from '../../server/reminders/dailySummaryScheduler.js'
+import { createRootEventSender } from '../../server/reminders/rootEventSender.js'
 
 interface DailySummaryEvent extends CustomAsyncWorkloadEvent {
   eventName: typeof DAILY_SUMMARY_EVENT
@@ -21,9 +22,12 @@ export async function handleDailySummary(event: AsyncWorkloadEvent<DailySummaryE
   let result = await event.step.run(`send-daily-summary:${scheduledFor}`, deliver)
   if (!result.stale && !('skipped' in result) && !result.sent) result = await event.step.run(`retry-send-daily-summary-v2:${scheduledFor}`, deliver)
   if (result.stale) return
-  // The independent maintenance function schedules tomorrow as a new root
-  // event, keeping daily delivery outside the SDK's finite chaining limit.
-  await event.step.run(`complete-daily-summary:${scheduledFor}`, () => completeDailySummaryEvent(event.eventId, scheduledFor))
+  const roots = createRootEventSender()
+  await event.step.run(`schedule-next-daily-summary:${scheduledFor}`, () => ensureDailySummarySchedule({
+    // Management commands retain SDK authentication/routing; only future daily
+    // occurrences use the independent root transport.
+    send: (name, options) => name === DAILY_SUMMARY_EVENT ? roots.send(name, options) : new AsyncWorkloadsClient().send(name, options)
+  }, new Date(Date.now()), { skipCancellationForEventId: event.eventId }))
 }
 
 export default asyncWorkloadFn<DailySummaryEvent>(handleDailySummary)

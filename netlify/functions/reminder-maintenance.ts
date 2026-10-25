@@ -6,4 +6,6 @@ export default async () => {
   return new Response(null, { status: 204 })
 }
 
-export const config: Config = { schedule: '*/5 * * * *' }
+// Normal changes and completed workloads schedule their own next events.
+// Only scan the full state hourly to recover missed scheduling failures.
+export const config: Config = { schedule: '0 * * * *' }

@@ -134,7 +134,11 @@ AI_API_KEY=在云函数环境变量中设置
 
 网页、登录和 API 默认使用同域 `/api`。每日汇总按设置中的当地时间与时区执行，默认 08:00；单项提醒由 Async Workload 延迟事件发送。
 
-`reminder-maintenance` 每 5 分钟检查待调度状态，创建独立根事件，续排重复提醒和每日汇总，避免累计触发 SDK 默认 20 次事件链限制。普通同步不会取消已经到点、正在投递或重试的汇总；超过一小时的汇总由维护函数尝试恢复。参考 [事件链限制](https://docs.netlify.com/build/async-workloads/optional-configuration/)。
+事项新增、修改、删除或提醒设置变更时安排相关提醒；空同步只读快照，不加写锁、不重写整份云端数据，也不扫描提醒。重复提醒和每日汇总在执行后，通过官方 router API 安排下一次独立根事件，避免累计触发 SDK 默认 20 次事件链限制。`reminder-maintenance` 每小时扫描一次作为调度失败的恢复兜底，不再每 5 分钟全量扫描。普通同步不会取消已经到点、正在投递或重试的汇总；绑定事件超过一小时仍未送达的事项及汇总由维护函数尝试恢复。异常恢复可能等待下一次小时检查；正常提醒不依赖该检查。参考 [发送事件](https://docs.netlify.com/build/async-workloads/sending-events/#send-using-the-router-api) 与 [事件链限制](https://docs.netlify.com/build/async-workloads/optional-configuration/)。
+
+为保留正常情况下约 1 分钟的提醒精度，Async Workloads 底层队列维持默认 60 秒轮询；它在生产环境即使空闲也会唤醒，不能仅靠新增事项触发。维护扫描从每天 288 次降至 24 次（减少约 92%）；两项固定调度合计从每天 1,728 次降至 1,464 次（减少约 15%），并减少空同步写入和重复读取。调用次数不等同于实际额度，费用变化还取决于执行时长、存储等资源。若以后接受最多约 5 分钟的正常排队延迟，可把 Builds scope 的 `AWL_SCHEDULER_INTERVAL` 设为 `300` 后重新部署；当前保持 `60`。参考 [Scheduler polling interval](https://docs.netlify.com/build/async-workloads/optional-configuration/#scheduler-polling-interval)。
+
+前台保留每分钟多设备同步；页面进入后台且没有待上传变更时，暂停空轮询。后台仍上传待同步修改，返回前台或恢复联网时立即刷新。Web Push 最多同时发送 4 个端点，每个请求设 10 秒 socket 空闲超时，减少慢端点依次阻塞造成的执行时间。投递失败仍按原有重试机制处理。
 
 定时维护仅在 published 生产部署自动执行。Deploy Preview、branch deploy 和 Netlify Dev 需要在 Functions 页面点击 **Run now** 或本地手动 invoke，不能用预览部署验证长期自动续排。参考 [Scheduled Functions](https://docs.netlify.com/build/functions/scheduled-functions/)。
 

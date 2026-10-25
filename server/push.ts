@@ -15,6 +15,9 @@ const webPushConfigErrors: Record<WebPushConfigReason, string> = {
   key_mismatch: 'VAPID 公私钥不匹配：请使用同一组密钥'
 }
 
+const PUSH_CONCURRENCY = 4
+const PUSH_SOCKET_TIMEOUT_MS = 10_000
+
 export interface PushPayload { title: string; body: string; url: string; tag: string }
 export interface DailyDigest { date: string; title: string; body: string; taskCount: number }
 export interface DailyDigestTask { id: string; title?: string; dueDate?: string | null; dateRange?: { start: string; end: string } | null; completed?: boolean; deletedAt?: string | null }
@@ -45,18 +48,27 @@ export async function sendPushPayload(payload: PushPayload) {
   const data = await cloudStore.read()
   let sent = 0
   let failed = 0
-  for (const subscription of data.subscriptions) {
-    if (!subscription.keys?.auth || !subscription.keys.p256dh) { failed += 1; continue }
-    try {
-      const url = notificationUrl(payload.url, subscription.appUrl)
-      await webpush.sendNotification(subscription as webpush.PushSubscription, JSON.stringify({ ...payload, url }))
-      sent += 1
-    } catch (error: any) {
-      failed += 1
-      console.error('[web-push]', subscription.endpoint, error?.statusCode ?? '', error instanceof Error ? error.message : String(error))
-      if (error?.statusCode === 404 || error?.statusCode === 410) await cloudStore.removeSubscription(subscription.endpoint)
+  let nextSubscription = 0
+  const expiredEndpoints: string[] = []
+  async function sendNext() {
+    while (nextSubscription < data.subscriptions.length) {
+      const subscription = data.subscriptions[nextSubscription++]!
+      if (!subscription.keys?.auth || !subscription.keys.p256dh) { failed += 1; continue }
+      try {
+        const url = notificationUrl(payload.url, subscription.appUrl)
+        await webpush.sendNotification(subscription as webpush.PushSubscription, JSON.stringify({ ...payload, url }), { timeout: PUSH_SOCKET_TIMEOUT_MS })
+        sent += 1
+      } catch (error: any) {
+        failed += 1
+        console.error('[web-push]', subscription.endpoint, error?.statusCode ?? '', error instanceof Error ? error.message : String(error))
+        if (error?.statusCode === 404 || error?.statusCode === 410) expiredEndpoints.push(subscription.endpoint)
+      }
     }
   }
+  // A slow endpoint should not block every device or create unbounded requests.
+  await Promise.all(Array.from({ length: Math.min(PUSH_CONCURRENCY, data.subscriptions.length) }, sendNext))
+  // Storage writes stay serial even when network sends run concurrently.
+  for (const endpoint of expiredEndpoints) await cloudStore.removeSubscription(endpoint)
   return { sent, failed, subscriptions: data.subscriptions.length }
 }
 

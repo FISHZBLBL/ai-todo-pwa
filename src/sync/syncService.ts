@@ -114,8 +114,26 @@ export function syncNow(): Promise<boolean> {
 }
 
 export function installAutoSync(onChange?: () => void) {
-  const handler = () => void syncNow().then(() => onChange?.()).catch(() => undefined)
+  let disposed = false
+  const handler = () => {
+    if (disposed) return
+    void syncNow().then(() => { if (!disposed) onChange?.() }).catch(() => undefined)
+  }
+  const poll = async () => {
+    if (disposed || !navigator.onLine || !api.hasSession()) return
+    // A hidden tab still uploads queued edits, but does not repeatedly fetch
+    // unchanged cloud state. Returning to the app refreshes it immediately.
+    if (document.visibilityState === 'hidden' && !await (await db()).count('syncQueue')) return
+    handler()
+  }
+  const onVisibilityChange = () => { if (document.visibilityState === 'visible') handler() }
   window.addEventListener('online', handler)
-  const timer = window.setInterval(handler, 60000)
-  return () => { window.removeEventListener('online', handler); window.clearInterval(timer) }
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  const timer = window.setInterval(() => void poll().catch(() => undefined), 60000)
+  return () => {
+    disposed = true
+    window.removeEventListener('online', handler)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+    window.clearInterval(timer)
+  }
 }
