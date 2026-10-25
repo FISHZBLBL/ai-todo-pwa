@@ -42,8 +42,13 @@ export async function applySyncResponse(response: SyncResponse, acknowledgedKeys
   }
   const localSettings = { ...defaultSettings, ...await transaction.objectStore('meta').get('settings') as Partial<Settings> | undefined }
   const settings = response.settings && Date.parse(response.settings.updatedAt) > Date.parse(localSettings.updatedAt) ? response.settings : localSettings
-  await transaction.objectStore('meta').put({ ...settings, lastSyncAt: new Date().toISOString() }, 'settings')
-  for (const key of acknowledgedKeys) await transaction.objectStore('syncQueue').delete(key)
+  const lastSyncAt = response.reminderSchedulingPending ? localSettings.lastSyncAt : new Date().toISOString()
+  await transaction.objectStore('meta').put({ ...settings, lastSyncAt }, 'settings')
+  // Keep the upload intent until reminder registration also succeeds. A later
+  // auto-sync retries the same changes without losing the cloud snapshot.
+  if (!response.reminderSchedulingPending) {
+    for (const key of acknowledgedKeys) await transaction.objectStore('syncQueue').delete(key)
+  }
   await transaction.done
 }
 
@@ -102,6 +107,7 @@ async function performSync() {
   for (const current of batches) {
     const response = await api.sync(current.map(entry => entry.change))
     await applySyncResponse(response, current.flatMap(entry => entry.keys))
+    if (response.reminderSchedulingPending) return false
   }
   return true
 }

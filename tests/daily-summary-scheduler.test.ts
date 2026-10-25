@@ -17,7 +17,7 @@ describe('每日汇总动态调度', () => {
     const sender = { send: vi.fn(async (name: string) => ({ sendStatus: 'succeeded' as const, eventId: name === 'awl:delete-events' ? 'cancel' : 'new-event' })) }
     const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
     const result = await ensureDailySummarySchedule(sender, new Date('2026-08-26T23:00:00.000Z'))
-    expect(sender.send.mock.calls[0]).toEqual(['daily.summary', { data: { scheduledFor: '2026-08-27T01:30:00.000Z' }, delayUntil: Date.parse('2026-08-27T01:30:00.000Z') }])
+    expect(sender.send.mock.calls[0]).toEqual(['daily.summary', { data: expect.objectContaining({ scheduledFor: '2026-08-27T01:30:00.000Z' }), delayUntil: Date.parse('2026-08-27T01:30:00.000Z') }])
     expect(sender.send.mock.calls[1]).toEqual(['awl:delete-events', { data: { eventIds: ['old-event'] } }])
     expect(result.schedule).toMatchObject({ eventId: 'new-event', dailySummaryTime: '09:30' })
   })
@@ -37,7 +37,7 @@ describe('每日汇总动态调度', () => {
     const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
     await ensureDailySummarySchedule(sender, new Date('2026-08-27T00:01:00.000Z'), { skipCancellationForEventId: 'current-event' })
     expect(sender.send).toHaveBeenCalledOnce()
-    expect(sender.send.mock.calls[0]).toEqual(['daily.summary', { data: { scheduledFor: '2026-08-28T00:00:00.000Z' }, delayUntil: Date.parse('2026-08-28T00:00:00.000Z') }])
+    expect(sender.send.mock.calls[0]).toEqual(['daily.summary', { data: expect.objectContaining({ scheduledFor: '2026-08-28T00:00:00.000Z' }), delayUntil: Date.parse('2026-08-28T00:00:00.000Z') }])
   })
   it('普通同步在到点后保留尚未投递的汇总事件', async () => {
     const schedule = { eventId: 'due-event', scheduledFor: '2026-10-04T00:00:00.000Z', dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
@@ -71,7 +71,7 @@ describe('每日汇总动态调度', () => {
     expect(setDailySummaryScheduleIfCurrent).not.toHaveBeenCalled()
     sender.send.mockResolvedValue({ sendStatus: 'succeeded', eventId: 'new-event' } as never)
     await ensureDailySummarySchedule(sender, now, { recoverOverdueAfterMs: 3_600_000 })
-    expect(sender.send).toHaveBeenCalledWith('daily.summary', { data: { scheduledFor: now.toISOString() }, delayUntil: now.getTime() + 60_000 })
+    expect(sender.send).toHaveBeenCalledWith('daily.summary', { data: expect.objectContaining({ scheduledFor: now.toISOString() }), delayUntil: now.getTime() + 60_000 })
   })
   it('已消费事件清理只影响仍匹配的指针', async () => {
     const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
@@ -100,10 +100,134 @@ describe('每日汇总动态调度', () => {
     const now = new Date('2026-10-12T00:05:00.000Z')
     getDailySummaryScheduleState.mockResolvedValue({ settings, schedule: overdue })
     await ensureDailySummarySchedule(sender, now, { recoverOverdueAfterMs: 0 })
-    expect(sender.send).toHaveBeenCalledWith('daily.summary', { data: { scheduledFor: now.toISOString() }, delayUntil: now.getTime() + 60_000 })
+    expect(sender.send).toHaveBeenCalledWith('daily.summary', { data: expect.objectContaining({ scheduledFor: now.toISOString() }), delayUntil: now.getTime() + 60_000 })
     sender.send.mockClear()
     getDailySummaryScheduleState.mockResolvedValue({ settings, schedule: { ...overdue, scheduledFor: '2026-10-13T00:00:00.000Z' } })
     await ensureDailySummarySchedule(sender, now, { recoverOverdueAfterMs: 0 })
     expect(sender.send).not.toHaveBeenCalled()
+  })
+
+  it('没有待办事项或推送订阅时清理现有汇总并停止续排', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    const schedule = { eventId: 'existing-summary', scheduledFor: '2026-10-26T00:00:00.000Z', ...settings }
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule, eligible: false })
+    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'cancel' })) }
+    const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(ensureDailySummarySchedule(sender)).resolves.toEqual({ scheduled: false, schedule: null })
+    expect(setDailySummaryScheduleIfCurrent).toHaveBeenCalledWith(null, schedule, settings, false)
+    expect(sender.send).toHaveBeenCalledExactlyOnceWith('awl:delete-events', { data: { eventIds: [schedule.eventId] } })
+  })
+
+  it('空队列保持休眠，新增事项或订阅后恢复每日汇总', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    getDailySummaryScheduleState.mockResolvedValueOnce({ settings, schedule: null, eligible: false }).mockResolvedValue({ settings, schedule: null, eligible: true })
+    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'resumed-summary' })) }
+    const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(ensureDailySummarySchedule(sender)).resolves.toEqual({ scheduled: false, schedule: null })
+    expect(sender.send).not.toHaveBeenCalled()
+    expect(setDailySummaryScheduleIfCurrent).not.toHaveBeenCalled()
+    await expect(ensureDailySummarySchedule(sender, new Date('2026-10-25T23:00:00.000Z'))).resolves.toMatchObject({ scheduled: true, schedule: { eventId: 'resumed-summary' } })
+    expect(setDailySummaryScheduleIfCurrent).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'resumed-summary' }), null, settings, true)
+    expect(sender.send).toHaveBeenCalledExactlyOnceWith('daily.summary', { data: { scheduledFor: '2026-10-26T00:00:00.000Z', dailySummaryTime: '08:00', timezone: 'Asia/Shanghai', settingsUpdatedAt: null, previousEventId: null }, delayUntil: Date.parse('2026-10-26T00:00:00.000Z') })
+  })
+
+  it('执行中的汇总发现队列为空时仅清理自身指针', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    const schedule = { eventId: 'current-summary', scheduledFor: '2026-10-25T00:00:00.000Z', ...settings }
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule, eligible: false })
+    const sender = { send: vi.fn() }
+    const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(ensureDailySummarySchedule(sender, new Date('2026-10-25T00:01:00.000Z'), { skipCancellationForEventId: schedule.eventId })).resolves.toEqual({ scheduled: false, schedule: null })
+    expect(setDailySummaryScheduleIfCurrent).toHaveBeenCalledWith(null, schedule, settings, false)
+    expect(sender.send).not.toHaveBeenCalled()
+  })
+
+  it('空快照之后新增事项时重新读取，不能取消仍然有效的汇总', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    const schedule = { eventId: 'needed-summary', scheduledFor: '2026-10-26T00:00:00.000Z', ...settings }
+    getDailySummaryScheduleState.mockResolvedValueOnce({ settings, schedule, eligible: false }).mockResolvedValue({ settings, schedule, eligible: true })
+    setDailySummaryScheduleIfCurrent.mockResolvedValueOnce(false)
+    const sender = { send: vi.fn() }
+    const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(ensureDailySummarySchedule(sender, new Date('2026-10-25T23:00:00.000Z'))).resolves.toEqual({ scheduled: false, schedule })
+    expect(getDailySummaryScheduleState).toHaveBeenCalledTimes(2)
+    expect(sender.send).not.toHaveBeenCalled()
+  })
+
+  it('创建期间失去订阅或任务时取消未登记的新事件并停止续排', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    getDailySummaryScheduleState.mockResolvedValueOnce({ settings, schedule: null, eligible: true }).mockResolvedValue({ settings, schedule: null, eligible: false })
+    setDailySummaryScheduleIfCurrent.mockResolvedValueOnce(false)
+    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'orphan-summary' })) }
+    const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(ensureDailySummarySchedule(sender)).resolves.toEqual({ scheduled: false, schedule: null })
+    expect(setDailySummaryScheduleIfCurrent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ eventId: 'orphan-summary' }), null, settings, true)
+    expect(sender.send).toHaveBeenLastCalledWith('awl:delete-events', { data: { eventIds: ['orphan-summary'] } })
+  })
+
+  it('续排事件携带设置版本和父事件指针用于创建进程中断后的恢复', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai', updatedAt: '2026-10-25T00:00:00.000Z' }
+    const schedule = { eventId: 'parent-summary', scheduledFor: '2026-10-25T00:00:00.000Z', dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone }
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule, eligible: true })
+    const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'child-summary' })) }
+    const { ensureDailySummarySchedule } = await import('../server/reminders/dailySummaryScheduler')
+    await ensureDailySummarySchedule(sender, new Date('2026-10-25T00:01:00.000Z'), { skipCancellationForEventId: schedule.eventId })
+    expect(sender.send).toHaveBeenCalledExactlyOnceWith('daily.summary', {
+      data: { scheduledFor: '2026-10-26T00:00:00.000Z', dailySummaryTime: '08:00', timezone: 'Asia/Shanghai', settingsUpdatedAt: settings.updatedAt, previousEventId: schedule.eventId },
+      delayUntil: Date.parse('2026-10-26T00:00:00.000Z')
+    })
+  })
+
+  it.each([null, 'parent-summary'])('云端指针为%s时，到点事件可以补登记自身', async previousEventId => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai', updatedAt: '2026-10-25T00:00:00.000Z' }
+    const schedule = previousEventId ? { eventId: previousEventId, scheduledFor: '2026-10-25T00:00:00.000Z', dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone } : null
+    const data = { scheduledFor: '2026-10-26T00:00:00.000Z', dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone, settingsUpdatedAt: settings.updatedAt, previousEventId }
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule, eligible: true })
+    const { registerUnboundDailySummaryEvent } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(registerUnboundDailySummaryEvent('accepted-alarm', data)).resolves.toBe(true)
+    expect(setDailySummaryScheduleIfCurrent).toHaveBeenCalledExactlyOnceWith({ eventId: 'accepted-alarm', scheduledFor: data.scheduledFor, dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone }, schedule, settings, true)
+  })
+
+  it.each(['dailySummaryTime', 'timezone', 'updatedAt'] as const)('设置的%s变化后不能用旧报警补登记', async field => {
+    const originalSettings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai', updatedAt: '2026-10-25T00:00:00.000Z' }
+    const changes = { dailySummaryTime: '09:00', timezone: 'Europe/London', updatedAt: '2026-10-25T00:01:00.000Z' }
+    const settings = { ...originalSettings, [field]: changes[field] }
+    const data = { scheduledFor: '2026-10-26T00:00:00.000Z', dailySummaryTime: originalSettings.dailySummaryTime, timezone: originalSettings.timezone, settingsUpdatedAt: originalSettings.updatedAt, previousEventId: null }
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule: null, eligible: true })
+    const { registerUnboundDailySummaryEvent } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(registerUnboundDailySummaryEvent('old-alarm', data)).resolves.toBe(false)
+    expect(setDailySummaryScheduleIfCurrent).not.toHaveBeenCalled()
+  })
+
+  it('其他事件已成功绑定后，旧报警不会覆盖该指针', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    const schedule = { eventId: 'newer-alarm', scheduledFor: '2026-10-26T00:00:00.000Z', ...settings }
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule, eligible: true })
+    const data = { scheduledFor: schedule.scheduledFor, ...settings, settingsUpdatedAt: null, previousEventId: null }
+    const { registerUnboundDailySummaryEvent } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(registerUnboundDailySummaryEvent('old-alarm', data)).resolves.toBe(false)
+    expect(setDailySummaryScheduleIfCurrent).not.toHaveBeenCalled()
+  })
+
+  it('已绑定的当前事件不重复写入，未带恢复元数据的旧事件不补登记', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    const schedule = { eventId: 'current-alarm', scheduledFor: '2026-10-26T00:00:00.000Z', ...settings }
+    getDailySummaryScheduleState.mockResolvedValue({ settings, schedule, eligible: true })
+    const { registerUnboundDailySummaryEvent } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(registerUnboundDailySummaryEvent(schedule.eventId, { scheduledFor: schedule.scheduledFor, ...settings, settingsUpdatedAt: null, previousEventId: null })).resolves.toBe(true)
+    await expect(registerUnboundDailySummaryEvent('legacy-event', { scheduledFor: schedule.scheduledFor })).resolves.toBe(false)
+    expect(setDailySummaryScheduleIfCurrent).not.toHaveBeenCalled()
+  })
+
+  it('没有待办或订阅的报警不自登记，CAS冲突也不会误认登记成功', async () => {
+    const settings = { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }
+    const data = { scheduledFor: '2026-10-26T00:00:00.000Z', ...settings, settingsUpdatedAt: null, previousEventId: null }
+    getDailySummaryScheduleState.mockResolvedValueOnce({ settings, schedule: null, eligible: false }).mockResolvedValue({ settings, schedule: null, eligible: true })
+    setDailySummaryScheduleIfCurrent.mockResolvedValue(false)
+    const { registerUnboundDailySummaryEvent } = await import('../server/reminders/dailySummaryScheduler')
+    await expect(registerUnboundDailySummaryEvent('accepted-alarm', data)).resolves.toBe(false)
+    expect(setDailySummaryScheduleIfCurrent).not.toHaveBeenCalled()
+    await expect(registerUnboundDailySummaryEvent('accepted-alarm', data)).resolves.toBe(false)
+    expect(setDailySummaryScheduleIfCurrent).toHaveBeenCalledOnce()
   })
 })

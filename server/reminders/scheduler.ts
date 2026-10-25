@@ -1,4 +1,4 @@
-import { AsyncWorkloadsClient } from '@netlify/async-workloads'
+import { alarmConfiguration, createAlarmEventSender } from './alarmClient.js'
 import { cloudStore, type ReminderTransition } from '../storage.js'
 
 export const TODO_REMINDER_EVENT = 'todo.reminder' as const
@@ -8,14 +8,10 @@ export interface AsyncEventSender {
   send(eventName: string, options?: { data?: unknown; delayUntil?: number | string; priority?: number }): Promise<{ sendStatus: 'succeeded' | 'failed'; eventId: string }>
 }
 
-const defaultSender = () => new AsyncWorkloadsClient() as AsyncEventSender
+const defaultSender = createAlarmEventSender
 
 export function isReminderSchedulingAvailable() {
-  const runtime = globalThis as typeof globalThis & { Netlify?: { context?: { url?: string } } }
-  try {
-    const url = runtime.Netlify?.context?.url
-    return Boolean(url && ['https:', 'http:'].includes(new URL(url).protocol))
-  } catch { return false }
+  return Boolean(alarmConfiguration())
 }
 
 interface ReconcileOptions { includeOverdue?: boolean }
@@ -41,7 +37,7 @@ export async function reconcileReminder(transition: ReminderTransition, sender: 
     if (reminderAt <= now && !options.includeOverdue) continue
     if (reminderAt >= now + MAX_DELAY_MS) throw new Error('提醒时间不能超过一年')
     const deliveryAt = reminderAt <= now ? now + 60_000 : reminderAt
-    const result = await sender.send(TODO_REMINDER_EVENT, { data: legacy ? { todoId: task.id } : { todoId: task.id, reminderId: reminder.id }, delayUntil: deliveryAt })
+    const result = await sender.send(TODO_REMINDER_EVENT, { data: { todoId: task.id, ...(legacy ? {} : { reminderId: reminder.id }), expectedAt: reminder.at, expectedUpdatedAt: task.updatedAt }, delayUntil: deliveryAt })
     if (result.sendStatus !== 'succeeded') throw new Error('创建提醒事件失败')
     const stored = legacy ? await cloudStore.setReminderEvent(task.id, reminder.at, result.eventId) : await cloudStore.setReminderEvent(task.id, reminder.id, reminder.at, result.eventId)
     if (!stored) { await cancelReminderEvents([result.eventId], sender); continue }

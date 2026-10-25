@@ -19,6 +19,7 @@ interface CloudData { tasks: StoredTask[]; drafts: StoredEntity[]; profiles: Sto
 export interface ReminderTransition { todoId: string; oldEventIds: string[] }
 const remindersOf = (task?: StoredTask) => task?.reminders ?? (task?.reminderEnabled && task.reminderAt ? [{ id: 'legacy', at: task.reminderAt, eventId: task.reminderEventId ?? null, sentAt: task.reminderSentAt ?? null, source: task.reminderMode === 'auto' ? 'auto' as const : 'explicit' as const }] : [])
 const empty = (): CloudData => ({ tasks: [], drafts: [], profiles: [], settings: null, subscriptions: [], dailySummarySentDates: [], dailySummarySchedule: null, deepseekSecret: null, deletionVersions: [] })
+const dailySummaryEligible = (data: CloudData) => data.subscriptions.length > 0 && data.tasks.some(task => !task.completed && !task.deletedAt)
 let lock = Promise.resolve()
 
 function isNewerTimestamp(incoming: string, current: string) {
@@ -320,8 +321,20 @@ export const cloudStore = {
   async hasSubscription(endpoint: string) { return (await read()).subscriptions.some(item => item.endpoint === endpoint) },
   async getTask(todoId: string) { return (await read()).tasks.find(task => task.id === todoId) ?? null },
   async setReminderEvent(todoId: string, reminderIdOrAt: string, atOrEventId: string, eventId?: string) { return mutate(data => { const task = data.tasks.find(item => item.id === todoId); if (!task) return false; if (!eventId) { if (!task.reminderEnabled || task.reminderAt !== reminderIdOrAt || task.completed || task.deletedAt || task.reminderEventId) return false; task.reminderEventId = atOrEventId; task.reminderSentAt = null; return true } const reminder = remindersOf(task).find(item => item.id === reminderIdOrAt); if (!reminder || reminder.at !== atOrEventId || task.completed || task.deletedAt || reminder.eventId) return false; reminder.eventId = eventId; reminder.sentAt = null; task.reminders = remindersOf(task); return true }) },
-  async clearReminderEventIfCurrent(todoId: string, reminderId: string, eventId: string) {
+  async bindUnregisteredReminder(todoId: string, reminderId: string, at: string, eventId: string, expectedUpdatedAt: string) {
     return mutate(data => {
+      const task = data.tasks.find(item => item.id === todoId)
+      if (!task || task.updatedAt !== expectedUpdatedAt || task.completed || task.deletedAt) return false
+      const reminder = remindersOf(task).find(item => item.id === reminderId)
+      if (!reminder || reminder.at !== at || reminder.eventId || reminder.sentAt) return false
+      if (task.reminders) reminder.eventId = eventId
+      else task.reminderEventId = eventId
+      return true
+    })
+  },
+  async clearReminderEventIfCurrent(todoId: string, reminderId: string, eventId: string, options: { requireNoSubscriptions?: boolean } = {}) {
+    return mutate(data => {
+      if (options.requireNoSubscriptions && data.subscriptions.length) return false
       const task = data.tasks.find(item => item.id === todoId)
       if (!task || task.completed || task.deletedAt) return false
       const reminder = remindersOf(task).find(item => item.id === reminderId)
@@ -357,13 +370,14 @@ export const cloudStore = {
       return true
     })
   },
-  async getDailySummaryScheduleState() { const data = await read(); return { settings: data.settings ?? { dailySummaryTime: '08:00', timezone: config.APP_TIMEZONE }, schedule: data.dailySummarySchedule } },
+  async getDailySummaryScheduleState() { const data = await read(); return { settings: data.settings ?? { dailySummaryTime: '08:00', timezone: config.APP_TIMEZONE }, schedule: data.dailySummarySchedule, eligible: dailySummaryEligible(data) } },
   async setDailySummarySchedule(schedule: DailySummarySchedule | null) { return mutate(data => { data.dailySummarySchedule = schedule }) },
-  async setDailySummaryScheduleIfCurrent(schedule: DailySummarySchedule | null, expectedSchedule: DailySummarySchedule | null, expectedSettings: { dailySummaryTime: string; timezone: string; updatedAt?: string }) {
+  async setDailySummaryScheduleIfCurrent(schedule: DailySummarySchedule | null, expectedSchedule: DailySummarySchedule | null, expectedSettings: { dailySummaryTime: string; timezone: string; updatedAt?: string }, expectedEligible?: boolean) {
     return mutate(data => {
       const settings = data.settings ?? { dailySummaryTime: '08:00', timezone: config.APP_TIMEZONE }
       const current = data.dailySummarySchedule
       if (settings.dailySummaryTime !== expectedSettings.dailySummaryTime || settings.timezone !== expectedSettings.timezone || data.settings?.updatedAt !== expectedSettings.updatedAt) return false
+      if (expectedEligible !== undefined && dailySummaryEligible(data) !== expectedEligible) return false
       if (current?.eventId !== expectedSchedule?.eventId || current?.scheduledFor !== expectedSchedule?.scheduledFor) return false
       data.dailySummarySchedule = schedule
       return true

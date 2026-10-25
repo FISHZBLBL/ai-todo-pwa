@@ -2,11 +2,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import serverless from 'serverless-http'
 import jwt from 'jsonwebtoken'
 
-const mocks = vi.hoisted(() => ({ pushConfig: vi.fn(), available: vi.fn(), addSubscription: vi.fn(), reconcile: vi.fn(), daily: vi.fn() }))
+const mocks = vi.hoisted(() => ({ pushConfig: vi.fn(), available: vi.fn(), addSubscription: vi.fn(), reconcile: vi.fn(), daily: vi.fn(), bootstrap: vi.fn() }))
 vi.mock('../server/pushConfig', () => ({ getWebPushConfig: mocks.pushConfig }))
 vi.mock('../server/storage', () => ({ cloudStore: { addSubscription: mocks.addSubscription } }))
 vi.mock('../server/reminders/scheduler', () => ({ isReminderSchedulingAvailable: mocks.available, reconcileReminderTransitions: mocks.reconcile }))
 vi.mock('../server/reminders/dailySummaryScheduler', () => ({ ensureDailySummarySchedule: mocks.daily }))
+vi.mock('../server/reminders/bootstrap', () => ({ bootstrapReminderSchedules: mocks.bootstrap }))
 
 let handler: ReturnType<typeof serverless>
 let token: string
@@ -27,7 +28,7 @@ describe('runtime Push configuration API', () => {
     mocks.pushConfig.mockReturnValue({ configured: true, publicKey: 'test-public-key', reason: null })
     mocks.available.mockReturnValue(true)
     mocks.addSubscription.mockResolvedValue({ reminderTransitions: [{ todoId: 'pending-task', oldEventIds: ['stopped-event'] }], firstSubscription: true })
-    mocks.reconcile.mockResolvedValue(undefined); mocks.daily.mockResolvedValue(undefined)
+    mocks.reconcile.mockResolvedValue(undefined); mocks.daily.mockResolvedValue(undefined); mocks.bootstrap.mockResolvedValue({ migrated: 0 })
   })
   it('returns the runtime public key and scheduler status without any private key', async () => {
     const result = await request('/api/push/config')
@@ -48,5 +49,7 @@ describe('runtime Push configuration API', () => {
     expect(result.statusCode).toBe(200)
     expect(mocks.reconcile).toHaveBeenCalledWith([{ todoId: 'pending-task', oldEventIds: ['stopped-event'] }], undefined, { includeOverdue: true })
     expect(mocks.daily).toHaveBeenCalled()
+    expect(mocks.bootstrap).toHaveBeenCalledOnce()
+    expect(JSON.parse(result.body)).toMatchObject({ reminderSchedulingPending: false })
   })
 })

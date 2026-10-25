@@ -1,38 +1,99 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import serverless from 'serverless-http'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { db, defaultSettings, getSettings, resetDatabaseForTests, saveSettings } from '../src/storage/database'
+import { taskRepository } from '../src/repositories/taskRepository'
+import { api, type SyncResponse } from '../src/services/api'
+import { applySyncResponse, installAutoSync, syncNow } from '../src/sync/syncService'
+import type { Task } from '../src/types'
 
-const mocks = vi.hoisted(() => ({ merge: vi.fn(), read: vi.fn(), getTask: vi.fn(), setReminderEvent: vi.fn(), getDailySummaryScheduleState: vi.fn(), send: vi.fn() }))
-vi.mock('../server/storage', () => ({ cloudStore: mocks }))
-vi.mock('../server/auth', () => ({ login: vi.fn(), requireAuth: (_req: unknown, _res: unknown, next: () => void) => next() }))
-vi.mock('@netlify/async-workloads', () => ({ AsyncWorkloadsClient: class { send = mocks.send } }))
+const id = (n: number) => `aaaaaaaa-aaaa-4aaa-8aaa-${String(n).padStart(12, '0')}`
+const task = (n: number, patch: Partial<Task> = {}): Task => ({
+  id: id(n), title: '到点提醒', pinned: false, completed: false, reminderMode: 'explicit',
+  reminders: [{ id: 'r1', at: '2026-10-25T09:00:00.000Z', source: 'explicit', eventId: null, sentAt: null }],
+  source: 'manual', createdAt: '2026-10-25T08:00:00.000Z', updatedAt: '2026-10-25T08:00:00.000Z', ...patch
+})
+const response = (patch: Partial<SyncResponse> = {}): SyncResponse => ({ tasks: [], drafts: [], profiles: [], settings: null, ...patch })
+const previousSyncAt = '2026-10-24T08:00:00.000Z'
+let dispose: (() => void) | undefined
 
-describe('同步确认后的过期一次性提醒补排', () => {
-  beforeAll(() => {
-    vi.stubEnv('NETLIFY', '1')
-    vi.stubGlobal('Netlify', { context: { url: 'https://example.netlify.app/api/sync', ip: '127.0.0.1' } })
+describe('reminder scheduling acknowledgement in client sync', () => {
+  beforeEach(async () => {
+    vi.restoreAllMocks()
+    await resetDatabaseForTests()
+    localStorage.clear(); sessionStorage.clear(); localStorage.setItem('todo-session', 'test-only')
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
+    await saveSettings({ ...defaultSettings, updatedAt: '2026-10-25T08:00:00.000Z', lastSyncAt: previousSyncAt })
   })
-  afterAll(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals() })
+  afterEach(() => {
+    dispose?.(); dispose = undefined
+    vi.useRealTimers(); vi.restoreAllMocks()
+    delete (navigator as unknown as Record<string, unknown>).onLine
+    delete (document as unknown as Record<string, unknown>).visibilityState
+  })
 
-  it('08:00 同步调度失败仍确认，08:03 到期的提醒在08:05维护时补排并绑定', async () => {
-    const task = { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', title: '吃药', dueDate: null, startTime: null, reminderMode: 'explicit', reminders: [{ id: 'r1', at: '2026-10-04T00:03:00.000Z', eventId: null as string | null, sentAt: null, source: 'explicit' }], pinned: false, completed: false, source: 'manual', createdAt: '2026-10-04T00:00:00.000Z', updatedAt: '2026-10-04T00:00:00.000Z' }
-    mocks.merge.mockResolvedValue({ tasks: [task], drafts: [], profiles: [], settings: null, deletions: [], reminderTransitions: [{ todoId: task.id, oldEventIds: [] }] })
-    mocks.read.mockResolvedValue({ tasks: [task] })
-    mocks.getTask.mockImplementation(async () => structuredClone(task))
-    mocks.setReminderEvent.mockImplementation(async (_todoId, _reminderId, _at, eventId) => { task.reminders[0].eventId = eventId; return true })
-    mocks.getDailySummaryScheduleState.mockResolvedValue({ settings: { dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' }, schedule: { eventId: 'summary', scheduledFor: '2026-10-05T00:00:00.000Z', dailySummaryTime: '08:00', timezone: 'Asia/Shanghai' } })
-    mocks.send.mockResolvedValueOnce({ sendStatus: 'failed', eventId: 'failed' }).mockResolvedValue({ sendStatus: 'succeeded', eventId: 'recovered' })
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-04T00:00:00.000Z'))
-    const handler = serverless((await import('../server/index')).app)
-    const result = await handler({ httpMethod: 'POST', path: '/api/sync', headers: { 'content-type': 'application/json' }, requestContext: {}, body: JSON.stringify({ changes: [{ entity: 'task', value: task }] }), isBase64Encoded: false }, {}) as { statusCode: number; body: string }
-    expect(result.statusCode).toBe(200)
-    expect(JSON.parse(result.body)).toMatchObject({ reminderSchedulingPending: true })
-    expect(task.reminders[0].eventId).toBeNull()
-    clock.mockReturnValue(Date.parse('2026-10-04T00:05:00.000Z'))
-    const { maintainReminderSchedules } = await import('../server/reminders/maintenance')
-    await maintainReminderSchedules(undefined, new Date(Date.now()))
-    expect(mocks.send).toHaveBeenNthCalledWith(2, 'todo.reminder', { data: { todoId: task.id, reminderId: 'r1' }, delayUntil: Date.parse('2026-10-04T00:06:00.000Z') })
-    expect(mocks.setReminderEvent).toHaveBeenCalledWith(task.id, 'r1', '2026-10-04T00:03:00.000Z', 'recovered')
-    expect(task.reminders[0].eventId).toBe('recovered')
-    clock.mockRestore()
+  it('applies the remote snapshot without acknowledging queued edits while registration is pending', async () => {
+    await taskRepository.save(task(1))
+    const keys = await (await db()).getAllKeys('syncQueue')
+    const remote = task(1, { title: '其他设备的较新标题', updatedAt: '2026-10-25T08:01:00.000Z' })
+    await applySyncResponse(response({ tasks: [remote], reminderSchedulingPending: true }), keys)
+    expect(await taskRepository.get(id(1))).toMatchObject({ title: remote.title, updatedAt: remote.updatedAt })
+    expect(await (await db()).getAllKeys('syncQueue')).toEqual(keys)
+    expect((await getSettings()).lastSyncAt).toBe(previousSyncAt)
+  })
+
+  it('reports pending once and only acknowledges its retained keys after a successful retry', async () => {
+    const local = await taskRepository.save(task(1))
+    await taskRepository.save({ ...local, title: '更新后的事项', updatedAt: '2026-10-25T08:01:00.000Z' })
+    const queuedKeys = await (await db()).getAllKeys('syncQueue')
+    const remote = task(1, { title: '更新后的事项', updatedAt: '2026-10-25T08:01:00.000Z' })
+    const registered = { ...remote, reminders: remote.reminders.map(reminder => ({ ...reminder, eventId: 'cf-reminder-1' })) }
+    const sync = vi.spyOn(api, 'sync')
+      .mockResolvedValueOnce(response({ tasks: [remote], reminderSchedulingPending: true }))
+      .mockResolvedValueOnce(response({ tasks: [registered], reminderSchedulingPending: false }))
+    await expect(syncNow()).resolves.toBe(false)
+    expect(sync).toHaveBeenCalledOnce()
+    expect(await (await db()).getAllKeys('syncQueue')).toEqual(queuedKeys)
+    expect((await getSettings()).lastSyncAt).toBe(previousSyncAt)
+    await expect(syncNow()).resolves.toBe(true)
+    expect(sync).toHaveBeenCalledTimes(2)
+    expect(sync.mock.calls[1][0]).toEqual(sync.mock.calls[0][0])
+    expect(await (await db()).count('syncQueue')).toBe(0)
+    expect((await taskRepository.get(id(1)))?.reminders[0].eventId).toBe('cf-reminder-1')
+    expect((await getSettings()).lastSyncAt).not.toBe(previousSyncAt)
+  })
+
+  it('retains a pending batch and untouched later batches while keeping earlier acknowledgements', async () => {
+    await taskRepository.saveMany([1, 2, 3].map(n => task(n, { note: '文'.repeat(50_000) })))
+    const sync = vi.spyOn(api, 'sync')
+      .mockResolvedValueOnce(response())
+      .mockResolvedValueOnce(response({ reminderSchedulingPending: true }))
+      .mockResolvedValue(response())
+    await expect(syncNow()).resolves.toBe(false)
+    expect(sync).toHaveBeenCalledTimes(2)
+    expect((await (await db()).getAll('syncQueue')).map(change => change.value.id)).toEqual([id(2), id(3)])
+    await expect(syncNow()).resolves.toBe(true)
+    expect(sync).toHaveBeenCalledTimes(4)
+    expect(sync.mock.calls.slice(2).flatMap(([changes]) => changes.map(change => change.value.id))).toEqual([id(2), id(3)])
+    expect(await (await db()).count('syncQueue')).toBe(0)
+  })
+
+  it('retries retained edits on the next one-minute timer tick without an immediate retry loop', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    await taskRepository.save(task(1))
+    const sync = vi.spyOn(api, 'sync')
+      .mockResolvedValueOnce(response({ reminderSchedulingPending: true }))
+      .mockResolvedValue(response())
+    const changed = vi.fn()
+    dispose = installAutoSync(changed)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce())
+    expect(sync).toHaveBeenCalledOnce()
+    expect(await (await db()).count('syncQueue')).toBe(1)
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(sync).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2))
+    expect(sync).toHaveBeenCalledTimes(2)
+    expect(await (await db()).count('syncQueue')).toBe(0)
   })
 })

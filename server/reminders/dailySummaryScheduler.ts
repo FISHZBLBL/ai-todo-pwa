@@ -1,4 +1,5 @@
-import { AsyncWorkloadsClient, ErrorRetryAfterDelay } from '@netlify/async-workloads'
+import { ErrorRetryAfterDelay } from './workflow.js'
+import { createAlarmEventSender } from './alarmClient.js'
 import { cloudStore, type DailySummarySchedule } from '../storage.js'
 
 export const DAILY_SUMMARY_EVENT = 'daily.summary' as const
@@ -8,9 +9,16 @@ export interface DailySummaryEventSender {
 }
 
 interface DailySummarySettings { dailySummaryTime: string; timezone: string }
+export interface DailySummaryEventData {
+  scheduledFor: string
+  dailySummaryTime?: string
+  timezone?: string
+  settingsUpdatedAt?: string | null
+  previousEventId?: string | null
+}
 interface EnsureOptions { skipCancellationForEventId?: string; recoverOverdueAfterMs?: number }
 
-const defaultSender = () => new AsyncWorkloadsClient() as DailySummaryEventSender
+const defaultSender = () => createAlarmEventSender() as DailySummaryEventSender
 
 function localParts(value: Date, timezone: string) {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(value)
@@ -54,19 +62,28 @@ async function cancel(eventId: string, sender: DailySummaryEventSender) {
 
 export async function ensureDailySummarySchedule(sender: DailySummaryEventSender = defaultSender(), now = new Date(), options: EnsureOptions = {}) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const { settings, schedule } = await cloudStore.getDailySummaryScheduleState()
+    const { settings, schedule, eligible } = await cloudStore.getDailySummaryScheduleState()
+    if (eligible === false) {
+      if (!schedule) return { scheduled: false as const, schedule: null }
+      if (!await cloudStore.setDailySummaryScheduleIfCurrent(null, schedule, settings, false)) continue
+      if (schedule.eventId !== options.skipCancellationForEventId) await cancel(schedule.eventId, sender)
+      return { scheduled: false as const, schedule: null }
+    }
     const sameSettings = schedule?.dailySummaryTime === settings.dailySummaryTime && schedule.timezone === settings.timezone
     const recovering = Boolean(schedule && options.recoverOverdueAfterMs != null && now.getTime() - Date.parse(schedule.scheduledFor) >= options.recoverOverdueAfterMs)
     // Reaching the clock time does not mean delivery has completed. Preserve
     // delayed/retrying events during ordinary sync, even after their due time.
     if (schedule && sameSettings && schedule.eventId !== options.skipCancellationForEventId && !recovering) return { scheduled: false as const, schedule }
-    // A replacement gets a fresh due timestamp so subsequent maintenance runs
-    // leave its retry window intact instead of replacing it every five minutes.
+    // A replacement gets a fresh due timestamp so subsequent sync requests
+    // leave its retry window intact.
     const scheduledFor = recovering && sameSettings ? now.toISOString() : new Date(nextDailySummaryAt(settings, now)).toISOString()
-    const result = await sender.send(DAILY_SUMMARY_EVENT, { data: { scheduledFor }, delayUntil: recovering && sameSettings ? now.getTime() + 60_000 : Date.parse(scheduledFor) })
+    const data: DailySummaryEventData = { scheduledFor, dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone, settingsUpdatedAt: 'updatedAt' in settings ? settings.updatedAt ?? null : null, previousEventId: schedule?.eventId ?? null }
+    const result = await sender.send(DAILY_SUMMARY_EVENT, { data, delayUntil: recovering && sameSettings ? now.getTime() + 60_000 : Date.parse(scheduledFor) })
     if (result.sendStatus !== 'succeeded') throw new Error('创建每日汇总事件失败')
     const next: DailySummarySchedule = { eventId: result.eventId, scheduledFor, dailySummaryTime: settings.dailySummaryTime, timezone: settings.timezone }
-    const stored = await cloudStore.setDailySummaryScheduleIfCurrent(next, schedule, settings)
+    const stored = eligible === undefined
+      ? await cloudStore.setDailySummaryScheduleIfCurrent(next, schedule, settings)
+      : await cloudStore.setDailySummaryScheduleIfCurrent(next, schedule, settings, eligible)
     if (!stored) {
       await cancel(result.eventId, sender)
       continue
@@ -77,6 +94,20 @@ export async function ensureDailySummarySchedule(sender: DailySummaryEventSender
     return { scheduled: true as const, schedule: next }
   }
   throw new Error('每日汇总设置正在更新，请稍后重试')
+}
+
+/** Recover an accepted alarm if its creator stopped before binding the pointer. */
+export async function registerUnboundDailySummaryEvent(eventId: string, data: DailySummaryEventData) {
+  if (typeof data.dailySummaryTime !== 'string' || typeof data.timezone !== 'string'
+    || (data.settingsUpdatedAt !== null && typeof data.settingsUpdatedAt !== 'string')
+    || (data.previousEventId !== null && typeof data.previousEventId !== 'string')) return false
+  const { settings, schedule, eligible } = await cloudStore.getDailySummaryScheduleState()
+  if (schedule?.eventId === eventId) return schedule.scheduledFor === data.scheduledFor
+  if (!eligible || settings.dailySummaryTime !== data.dailySummaryTime || settings.timezone !== data.timezone
+    || ('updatedAt' in settings ? settings.updatedAt ?? null : null) !== data.settingsUpdatedAt
+    || (schedule?.eventId ?? null) !== data.previousEventId) return false
+  const next: DailySummarySchedule = { eventId, scheduledFor: data.scheduledFor, dailySummaryTime: data.dailySummaryTime, timezone: data.timezone }
+  return cloudStore.setDailySummaryScheduleIfCurrent(next, schedule, settings, true)
 }
 
 export async function completeDailySummaryEvent(eventId: string, scheduledFor: string) {

@@ -52,7 +52,7 @@ describe('每日汇总 workload', () => {
     expect(sendDailySummary).toHaveBeenCalledTimes(2)
     expect(ensureDailySummarySchedule).toHaveBeenCalledOnce()
   })
-  it('无任务或当天已发送时仍安排下一天', async () => {
+  it('无任务或当天已发送时由调度层判断是否需要下一次汇总', async () => {
     isCurrentDailySummaryEvent.mockResolvedValue(true)
     sendDailySummary.mockResolvedValue({ date: '2026-10-04', sent: 0, skipped: 'empty' })
     const { handleDailySummary } = await import('../netlify/functions/daily-summary')

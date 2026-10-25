@@ -14,9 +14,14 @@ import { rateLimitKey } from './rate-limit.js'
 import { clockTimeSchema, syncChangeSchema } from '../shared/syncSchema.js'
 import { MAX_SYNC_CHANGES } from '../shared/limits.js'
 import { getWebPushConfig } from './pushConfig.js'
+import { alarmRequest } from './reminders/alarmClient.js'
+import { bootstrapReminderSchedules } from './reminders/bootstrap.js'
+import { deliverReminder, isSchedulerRequest } from './reminders/callback.js'
 
 export const app = express()
 app.set('trust proxy', false); app.use(helmet()); app.use(cors({ origin: config.CORS_ORIGIN.split(',').map(v => v.trim()) })); app.use(express.json({ limit: '256kb' }))
+// The scheduler has its own narrow authentication; it never uses a user's JWT.
+app.post('/api/reminders/deliver', deliverReminder)
 // The Netlify Lambda adapter can omit request.ip. Using Draft-8 headers then
 // crashes inside express-rate-limit before our route handlers are called.
 const rateLimitOptions = { keyGenerator: rateLimitKey, standardHeaders: false, legacyHeaders: false }
@@ -25,6 +30,16 @@ const aiLimit = rateLimit({ windowMs: 60_000, limit: 30, ...rateLimitOptions })
 const authLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, ...rateLimitOptions })
 const clockTime = clockTimeSchema
 app.use('/api', normalLimit)
+app.post('/api/reminders/bootstrap', (req, res, next) => isSchedulerRequest(req) ? next() : requireAuth(req, res, next), async (_req, res) => {
+  try { res.json(await bootstrapReminderSchedules()) }
+  catch { res.status(503).json({ error: '提醒迁移尚未完成，可安全重试' }) }
+})
+app.get('/api/reminders/status', requireAuth, async (_req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store')
+  if (!isReminderSchedulingAvailable()) return res.json({ configured: false })
+  try { res.json({ configured: true, ...await alarmRequest<Record<string, unknown>>('/status') }) }
+  catch { res.status(503).json({ configured: true, error: '提醒定时服务暂不可用' }) }
+})
 app.post('/api/auth/login', authLimit, async (req, res) => { const password = z.string().min(1).max(200).safeParse(req.body?.password); if (!password.success) return res.status(400).json({ error: '请输入密码' }); const token = await login(password.data); if (!token) return res.status(401).json({ error: '密码错误' }); res.json({ token }) })
 app.get('/api/health', requireAuth, async (_req, res) => { const secret = await cloudStore.getDeepseekSecret(); res.json({ ok: true, ai: { provider: config.AI_PROVIDER, model: config.AI_MODEL, configured: Boolean(secret || config.AI_API_KEY) } }) })
 app.get('/api/ai-settings/deepseek', requireAuth, async (_req, res) => { const secret = await cloudStore.getDeepseekSecret(); res.json({ deepseek: secret ? { configured: true, maskedKey: maskedDeepseekKey(secret), updatedAt: secret.updatedAt } : { configured: Boolean(config.AI_API_KEY), maskedKey: config.AI_API_KEY ? '服务器环境变量' : null, updatedAt: null } }) })
@@ -43,15 +58,16 @@ app.post('/api/sync', requireAuth, async (req, res) => {
       const data = await cloudStore.read()
       merged = { tasks: data.tasks, drafts: data.drafts, profiles: data.profiles, settings: data.settings, deletions: data.deletionVersions, reminderTransitions: [] }
     }
-    let reminderSchedulingPending = false
     const schedulesChanged = input.data.changes.some(change => change.entity === 'task' || change.entity === 'settings')
-    if (schedulesChanged && isReminderSchedulingAvailable()) {
+    const schedulingAvailable = isReminderSchedulingAvailable()
+    let reminderSchedulingPending = schedulesChanged && !schedulingAvailable
+    if (schedulesChanged && schedulingAvailable) {
       try {
-        if (merged.reminderTransitions.length) await reconcileReminderTransitions(merged.reminderTransitions)
+        if (merged.reminderTransitions.length) await reconcileReminderTransitions(merged.reminderTransitions, undefined, { includeOverdue: true })
         await ensureDailySummarySchedule()
       } catch {
-        // The independent maintenance function retries scheduling. The cloud
-        // merge has succeeded, so acknowledge its durable data separately.
+        // The data merge succeeded. Clients keep this batch queued until the
+        // event-driven scheduler durably acknowledges the reminders as well.
         reminderSchedulingPending = true
       }
     }
@@ -67,17 +83,29 @@ app.post('/api/push/subscribe', requireAuth, async (req, res) => {
   const input = z.object({ endpoint: z.string().url(), keys: z.object({ auth: z.string(), p256dh: z.string() }), appUrl: z.string().url() }).safeParse(req.body)
   if (!input.success) return res.status(400).json({ error: 'Push Subscription 无效' })
   const saved = await cloudStore.addSubscription(input.data)
-  let reminderSchedulingPending = false
+  let reminderSchedulingPending = !isReminderSchedulingAvailable()
   if (isReminderSchedulingAvailable()) {
     try {
       await reconcileReminderTransitions(saved?.reminderTransitions ?? [], undefined, { includeOverdue: true })
       if (saved?.firstSubscription) await ensureDailySummarySchedule(undefined, new Date(), { recoverOverdueAfterMs: 0 })
       else await ensureDailySummarySchedule()
+      // Subscription actions also resume any unbound future reminders and
+      // adopt old pointers; no background state scanner is needed.
+      await bootstrapReminderSchedules()
     } catch { reminderSchedulingPending = true }
   }
   res.status(200).json({ ok: true, reminderSchedulingPending })
 })
 app.get('/api/push/subscription', requireAuth, async (req, res) => { const endpoint = z.string().url().safeParse(req.query.endpoint); if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' }); res.json({ registered: await cloudStore.hasSubscription(endpoint.data) }) })
-app.delete('/api/push/subscribe', requireAuth, async (req, res) => { const endpoint = z.string().url().safeParse(req.body?.endpoint); if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' }); await cloudStore.removeSubscription(endpoint.data); res.status(200).json({ ok: true }) })
+app.delete('/api/push/subscribe', requireAuth, async (req, res) => {
+  const endpoint = z.string().url().safeParse(req.body?.endpoint)
+  if (!endpoint.success) return res.status(400).json({ error: 'Subscription endpoint 无效' })
+  await cloudStore.removeSubscription(endpoint.data)
+  let reminderSchedulingPending = false
+  if (isReminderSchedulingAvailable()) {
+    try { await bootstrapReminderSchedules() } catch { reminderSchedulingPending = true }
+  }
+  res.status(200).json({ ok: true, reminderSchedulingPending })
+})
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))
 if (!process.env.SCF_RUNTIME && !process.env.NETLIFY && process.env.NETLIFY_DEV !== 'true') app.listen(config.PORT, () => console.log(`AI Todo API listening on :${config.PORT}`))

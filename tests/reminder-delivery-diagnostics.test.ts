@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createECDH } from 'node:crypto'
-import { ErrorDoNotRetry, ErrorRetryAfterDelay } from '@netlify/async-workloads'
+import { ErrorDoNotRetry, ErrorRetryAfterDelay } from '../server/reminders/workflow'
 
 const mocks = vi.hoisted(() => ({
   config: { VAPID_PUBLIC_KEY: 'test-public', VAPID_PRIVATE_KEY: 'test-private', VAPID_SUBJECT: 'mailto:test@example.com', APP_TIMEZONE: 'Asia/Shanghai' },
@@ -47,12 +47,12 @@ describe('提醒故障状态的本地只读诊断', () => {
     const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
     await expect(handleTodoReminder(event() as never)).rejects.toBeInstanceOf(ErrorDoNotRetry)
     expect(current.reminders[0]).toMatchObject({ eventId: null, sentAt: null })
-    expect(mocks.clearReminderEventIfCurrent).toHaveBeenCalledWith('synthetic-task', 'r1', 'registered-event')
+    expect(mocks.clearReminderEventIfCurrent).toHaveBeenCalledWith('synthetic-task', 'r1', 'registered-event', { requireNoSubscriptions: true })
     expect(mocks.markReminderSent).not.toHaveBeenCalled()
     expect(mocks.sendNotification).not.toHaveBeenCalled()
   })
 
-  it('零订阅终止后维护不会重复创建事件，新增订阅后能够重新登记', async () => {
+  it('零订阅终止后保留未发送状态，新增订阅触发明确的事项重排', async () => {
     const current = task()
     const state: { tasks: typeof current[]; subscriptions: unknown[] } = { tasks: [current], subscriptions: [] }
     mocks.read.mockImplementation(async () => state)
@@ -62,14 +62,24 @@ describe('提醒故障状态的本地只读诊断', () => {
     const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
     await expect(handleTodoReminder(event() as never)).rejects.toBeInstanceOf(ErrorDoNotRetry)
     const sender = { send: vi.fn(async () => ({ sendStatus: 'succeeded' as const, eventId: 'recovered-event' })) }
-    const { maintainReminderSchedules } = await import('../server/reminders/maintenance')
-    await maintainReminderSchedules(sender, new Date())
     expect(sender.send).not.toHaveBeenCalled()
     expect(mocks.setReminderEvent).not.toHaveBeenCalled()
     state.subscriptions.push({ endpoint: 'https://push.example.test/synthetic', keys: { auth: 'synthetic', p256dh: 'synthetic' }, appUrl: 'https://app.example.test/' })
-    await maintainReminderSchedules(sender, new Date())
+    const { reconcileReminder } = await import('../server/reminders/scheduler')
+    await reconcileReminder({ todoId: current.id, oldEventIds: [] }, sender, Date.now(), { includeOverdue: true })
     expect(sender.send).toHaveBeenCalledOnce()
     expect(current.reminders[0]).toMatchObject({ eventId: 'recovered-event', sentAt: null })
     expect(mocks.sendNotification).not.toHaveBeenCalled()
+  })
+
+  it('零订阅快照后新订阅到达时保留事件并重试，不清掉新设备的提醒', async () => {
+    const current = task()
+    mocks.getTask.mockResolvedValue(current)
+    mocks.clearReminderEventIfCurrent.mockResolvedValue(false)
+    const { handleTodoReminder } = await import('../netlify/functions/todo-reminder')
+    await expect(handleTodoReminder(event() as never)).rejects.toBeInstanceOf(ErrorRetryAfterDelay)
+    expect(current.reminders[0].eventId).toBe('registered-event')
+    expect(mocks.clearReminderEventIfCurrent).toHaveBeenCalledWith('synthetic-task', 'r1', 'registered-event', { requireNoSubscriptions: true })
+    expect(mocks.markReminderSent).not.toHaveBeenCalled()
   })
 })

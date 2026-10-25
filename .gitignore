@@ -5,6 +5,7 @@ dist/
 scf/dist-server/
 .env
 .env.local
+.env.reminders.local
 .cloudbaserc.local.json
 data/
 coverage/

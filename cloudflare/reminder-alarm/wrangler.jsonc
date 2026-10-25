@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-todo-reminder-alarm",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-25",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "REMINDER_ALARM", "class_name": "ReminderAlarm" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ReminderAlarm"] }],
+  "vars": {
+    "REMINDER_CALLBACK_URL": "https://ai-todo-pwa.netlify.app/api/reminders/deliver"
+  }
+}

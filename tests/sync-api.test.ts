@@ -52,7 +52,7 @@ describe('sync HTTP contract', () => {
     expect((await sync([{ entity: 'task', value: task }])).statusCode).toBe(200)
     expect(mocks.merge).toHaveBeenCalledOnce()
     expect(mocks.read).not.toHaveBeenCalled()
-    expect(mocks.reconcile).toHaveBeenCalledWith(transitions)
+    expect(mocks.reconcile).toHaveBeenCalledWith(transitions, undefined, { includeOverdue: true })
     expect(mocks.daily).toHaveBeenCalledOnce()
   })
   it('reschedules the daily summary after settings change without scanning tasks', async () => {
@@ -72,12 +72,30 @@ describe('sync HTTP contract', () => {
     expect(mocks.reconcile).not.toHaveBeenCalled()
     expect(mocks.daily).not.toHaveBeenCalled()
   })
-  it('acknowledges a committed merge when scheduling needs maintenance retry', async () => {
+  it('keeps reminder registration pending when the scheduler is not configured', async () => {
+    const result = await sync([{ entity: 'task', value: task }])
+    expect(result.statusCode).toBe(200)
+    expect(JSON.parse(result.body)).toMatchObject({ reminderSchedulingPending: true })
+    expect(mocks.merge).toHaveBeenCalledOnce()
+    expect(mocks.reconcile).not.toHaveBeenCalled()
+  })
+  it('acknowledges a committed merge while the client retains a scheduling retry', async () => {
     mocks.available.mockReturnValue(true); mocks.reconcile.mockRejectedValueOnce(new Error('scheduler unavailable'))
     mocks.merge.mockResolvedValueOnce({ tasks: [task], drafts: [], profiles: [], settings: null, deletions: [], reminderTransitions: [{ todoId: task.id, oldEventIds: [] }] })
     const result = await sync([{ entity: 'task', value: task }])
     expect(result.statusCode).toBe(200)
     expect(JSON.parse(result.body)).toMatchObject({ reminderSchedulingPending: true })
+  })
+  it('retries the same saved task after its reminder time has passed', async () => {
+    mocks.available.mockReturnValue(true)
+    const transitions = [{ todoId: task.id, oldEventIds: [] }]
+    mocks.merge.mockResolvedValue({ tasks: [task], drafts: [], profiles: [], settings: null, deletions: [], reminderTransitions: transitions })
+    mocks.reconcile.mockRejectedValueOnce(new Error('scheduler unavailable')).mockResolvedValue(undefined)
+    const first = await sync([{ entity: 'task', value: task }])
+    expect(JSON.parse(first.body).reminderSchedulingPending).toBe(true)
+    const retry = await sync([{ entity: 'task', value: task }])
+    expect(JSON.parse(retry.body).reminderSchedulingPending).toBe(false)
+    expect(mocks.reconcile).toHaveBeenNthCalledWith(2, transitions, undefined, { includeOverdue: true })
   })
   it('rejects impossible dates without modifying cloud data', async () => {
     expect((await sync([{ entity: 'task', value: { ...task, dueDate: '2026-02-30' } }])).statusCode).toBe(400)

@@ -127,7 +127,7 @@ async function disablePush() {
 }
 async function runSync() {
   syncBusy.value = true; syncMessage.value = '正在同步…'
-  try { const synced = await syncNow(); settings.value = await getSettings(); syncIssues.value = await getSyncIssues(); syncMessage.value = synced ? (syncIssues.value.length ? `同步完成；${syncIssues.value.length} 条记录需要修正` : '同步完成') : navigator.onLine ? '当前没有有效登录会话' : '当前处于离线状态' }
+  try { const synced = await syncNow(); settings.value = await getSettings(); syncIssues.value = await getSyncIssues(); syncMessage.value = synced ? (syncIssues.value.length ? `同步完成；${syncIssues.value.length} 条记录需要修正` : '同步完成') : !navigator.onLine ? '当前处于离线状态' : api.hasSession() ? '事项已保存，提醒登记尚未完成，将自动重试' : '当前没有有效登录会话' }
   catch (error) { syncMessage.value = error instanceof Error ? error.message : '同步失败' }
   finally { syncBusy.value = false }
 }

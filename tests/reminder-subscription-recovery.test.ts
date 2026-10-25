@@ -79,10 +79,26 @@ describe('首次 Push 订阅与遗留提醒恢复的原子存储', () => {
     const { reconcileReminderTransitions } = await import('../server/reminders/scheduler')
     await reconcileReminderTransitions(saved.reminderTransitions, sender, { includeOverdue: true })
     expect(sender.send).toHaveBeenCalledWith('awl:delete-events', { data: { eventIds: ['dead-event'] } })
-    expect(sender.send).toHaveBeenCalledWith('todo.reminder', { data: { todoId: value.id, reminderId: 'r1' }, delayUntil: now + 60_000 })
+    expect(sender.send).toHaveBeenCalledWith('todo.reminder', { data: { todoId: value.id, reminderId: 'r1', expectedAt: due, expectedUpdatedAt: value.updatedAt }, delayUntil: now + 60_000 })
     expect((await store.getTask(value.id))?.reminders?.[0].eventId).toBe('fresh-event')
     expect(await store.clearReminderEventIfCurrent(value.id, 'r1', 'dead-event')).toBe(false)
     expect((await store.getTask(value.id))?.reminders?.[0].eventId).toBe('fresh-event')
     clock.mockRestore()
+  })
+  it('登记失败后重放同版本事项，越过提醒时间仍会补排', async () => {
+    const store = await fileStore()
+    const value = { id: 'test-task', updatedAt: due, reminders: [{ id: 'r1', at: due, eventId: null, sentAt: null }] }
+    const changes = [{ entity: 'task', value }]
+    const first = await store.merge(changes)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(due) - 60_000)
+    const sender = { send: vi.fn().mockRejectedValueOnce(new Error('scheduler unavailable')).mockResolvedValue({ sendStatus: 'succeeded', eventId: 'cf:recovered' }) }
+    const { reconcileReminderTransitions } = await import('../server/reminders/scheduler')
+    await expect(reconcileReminderTransitions(first.reminderTransitions, sender, { includeOverdue: true })).rejects.toThrow('scheduler unavailable')
+    clock.mockReturnValue(Date.parse(due) + 60_000)
+    const replay = await store.merge(changes)
+    expect(replay.reminderTransitions).toHaveLength(1)
+    await reconcileReminderTransitions(replay.reminderTransitions, sender, { includeOverdue: true })
+    expect(sender.send).toHaveBeenLastCalledWith('todo.reminder', { data: { todoId: value.id, reminderId: 'r1', expectedAt: due, expectedUpdatedAt: due }, delayUntil: Date.parse(due) + 120_000 })
+    expect((await store.getTask(value.id))?.reminders?.[0].eventId).toBe('cf:recovered')
   })
 })
