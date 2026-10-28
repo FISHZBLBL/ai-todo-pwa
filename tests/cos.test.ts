@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CosObjectStore } from '../server/cos'
+import { CosObjectStore, CosOperationError } from '../server/cos'
 
 describe('腾讯 COS 对象存储客户端', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -15,8 +15,8 @@ describe('腾讯 COS 对象存储客户端', () => {
     expect((init.headers as Headers).get('Authorization')).not.toContain('secret-test-value')
   })
 
-  it('把锁对象冲突转换为未获取锁', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 409 })))
+  it.each([409, 412])('把锁对象 HTTP %s 冲突转换为未获取锁', async status => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status })))
     const storage = new CosObjectStore('ai-todo-1323797631', 'ap-shanghai', 'AKIDTEST', 'secret-test-value')
     await expect(storage.putText('ai-todo/state.json.lock', '{}', { forbidOverwrite: true })).resolves.toBe(false)
   })
@@ -40,5 +40,34 @@ describe('腾讯 COS 对象存储客户端', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<Error>AccessDenied</Error>', { status: 403 })))
     const storage = new CosObjectStore('ai-todo-1323797631', 'ap-shanghai', 'AKIDTEST', 'secret-test-value')
     await expect(storage.assertSafeLocking()).rejects.toThrow('403')
+  })
+
+  it.each(['object-read', 'object-write', 'object-delete', 'bucket-versioning'] as const)('HTTP 拒绝权限保留 %s 操作和安全错误码，不泄露响应正文', async operation => {
+    const sensitive = 'private-object-state secret-test-value AKIDTEST'
+    const xml = `<Error><Code>AccessDenied</Code><Message>${sensitive}</Message><Resource>ai-todo/private-object-state.json</Resource></Error>`
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(xml, { status: 403 })))
+    const storage = new CosObjectStore('ai-todo-1323797631', 'ap-shanghai', 'AKIDTEST', 'secret-test-value')
+    const request = operation === 'object-read' ? storage.getText('ai-todo/private-object-state.json')
+      : operation === 'object-write' ? storage.putText('ai-todo/private-object-state.json', sensitive)
+        : operation === 'object-delete' ? storage.delete('ai-todo/private-object-state.json')
+          : storage.assertSafeLocking()
+    const error = await request.catch((failure: unknown) => failure)
+    expect(error).toBeInstanceOf(CosOperationError)
+    expect(error).toMatchObject({ name: 'CosOperationError', operation, httpStatus: 403, serviceCode: 'AccessDenied' })
+    if (!(error instanceof CosOperationError)) throw new Error('Expected structured COS failure')
+    expect(error.message).toBe('腾讯 COS 请求失败：HTTP 403')
+    for (const detail of [xml, '<Error>', 'AccessDenied', 'private-object-state', 'secret-test-value', 'AKIDTEST']) expect(error.message).not.toContain(detail)
+  })
+
+  it.each(['', '1AccessDenied', 'Access Denied', 'AccessDenied\nsecret', 'AccessDenied\n', 'AccessDenied\r', 'A'.repeat(81), '<SecretKey>secret-test-value</SecretKey>'])('非法 Code 不作为服务端错误码返回：%s', async code => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(`<Error><Code>${code}</Code><Message>secret-test-value</Message></Error>`, { status: 403 })))
+    const storage = new CosObjectStore('ai-todo-1323797631', 'ap-shanghai', 'AKIDTEST', 'secret-test-value')
+    await expect(storage.getText('ai-todo/state.json')).rejects.toMatchObject({ operation: 'object-read', httpStatus: 403, serviceCode: null, message: '腾讯 COS 请求失败：HTTP 403' })
+  })
+
+  it('对象不存在仍返回 null，不抛出结构化权限错误', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 })))
+    const storage = new CosObjectStore('ai-todo-1323797631', 'ap-shanghai', 'AKIDTEST', 'secret-test-value')
+    await expect(storage.getText('ai-todo/missing.json')).resolves.toBeNull()
   })
 })

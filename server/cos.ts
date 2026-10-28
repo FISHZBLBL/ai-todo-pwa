@@ -6,6 +6,17 @@ const sha1 = (value: string) => createHash('sha1').update(value).digest('hex')
 const hmacSha1 = (key: string, value: string) => createHmac('sha1', key).update(value).digest('hex')
 const encodePath = (key: string) => key.split('/').map(part => encodeURIComponent(part)).join('/')
 
+export class CosOperationError extends Error {
+  constructor(
+    readonly operation: 'object-read' | 'object-write' | 'object-delete' | 'bucket-versioning',
+    readonly httpStatus: number,
+    readonly serviceCode: string | null,
+  ) {
+    super(`腾讯 COS 请求失败：HTTP ${httpStatus}`)
+    this.name = 'CosOperationError'
+  }
+}
+
 export class CosObjectStore {
   private readonly host: string
 
@@ -23,7 +34,7 @@ export class CosObjectStore {
   async getText(key: string): Promise<string | null> {
     const response = await this.request('GET', key)
     if (response.status === 404) return null
-    await this.assertOk(response, key)
+    await this.assertOk(response, 'object-read')
     return response.text()
   }
 
@@ -31,13 +42,13 @@ export class CosObjectStore {
     const headers = options.forbidOverwrite ? { 'x-cos-forbid-overwrite': 'true' } : undefined
     const response = await this.request('PUT', key, value, headers)
     if (options.forbidOverwrite && (response.status === 409 || response.status === 412)) return false
-    await this.assertOk(response, key)
+    await this.assertOk(response, 'object-write')
     return true
   }
 
   async delete(key: string): Promise<void> {
     const response = await this.request('DELETE', key)
-    await this.assertOk(response, key)
+    await this.assertOk(response, 'object-delete')
   }
 
   // https://cloud.tencent.com/document/product/436/7749 documents
@@ -45,7 +56,7 @@ export class CosObjectStore {
   // never-enabled versioning: https://cloud.tencent.com/document/api/436/19888.
   async assertSafeLocking(): Promise<void> {
     const response = await this.request('GET', '', undefined, {}, { versioning: '' })
-    await this.assertOk(response, '(bucket versioning)')
+    await this.assertOk(response, 'bucket-versioning')
     const xml = await response.text()
     if (/<Status(?:\s[^>]*)?(?:>|\/>)/.test(xml)) throw new Error('COS 安全写入需要从未开启版本控制的存储桶；请改用支持事务的 cloudbase 存储')
     const root = xml.replace(/^\s*<\?xml[^>]*>\s*/, '').trim()
@@ -88,10 +99,11 @@ export class CosObjectStore {
     }
   }
 
-  private async assertOk(response: Response, key: string) {
+  private async assertOk(response: Response, operation: CosOperationError['operation']) {
     if (response.ok) return
-    const requestId = response.headers.get('x-cos-request-id')
-    const detail = (await response.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 200)
-    throw new Error(`腾讯 COS 请求失败：${response.status}，对象 ${key}${requestId ? `，请求 ${requestId}` : ''}${detail ? `，${detail}` : ''}`)
+    const xml = await response.text().catch(() => '')
+    const code = /<Code>([^<]*)<\/Code>/.exec(xml)?.[1]
+    const serviceCode = code && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.exec(code)?.[0] === code ? code : null
+    throw new CosOperationError(operation, response.status, serviceCode)
   }
 }

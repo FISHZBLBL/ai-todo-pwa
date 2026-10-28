@@ -17,6 +17,7 @@ import { getWebPushConfig } from './pushConfig.js'
 import { alarmRequest } from './reminders/alarmClient.js'
 import { bootstrapReminderSchedules } from './reminders/bootstrap.js'
 import { deliverReminder, isSchedulerRequest } from './reminders/callback.js'
+import { reminderFailureDiagnostic } from './reminders/diagnostics.js'
 
 export const app = express()
 app.set('trust proxy', false); app.use(helmet()); app.use(cors({ origin: config.CORS_ORIGIN.split(',').map(v => v.trim()) })); app.use(express.json({ limit: '256kb' }))
@@ -30,9 +31,20 @@ const aiLimit = rateLimit({ windowMs: 60_000, limit: 30, ...rateLimitOptions })
 const authLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, ...rateLimitOptions })
 const clockTime = clockTimeSchema
 app.use('/api', normalLimit)
-app.post('/api/reminders/bootstrap', (req, res, next) => isSchedulerRequest(req) ? next() : requireAuth(req, res, next), async (_req, res) => {
+const reminderAdminAuth: express.RequestHandler = (req, res, next) => { if (isSchedulerRequest(req)) next(); else requireAuth(req, res, next) }
+app.get('/api/reminders/preflight', reminderAdminAuth, async (_req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store')
+  try {
+    const data = await cloudStore.read()
+    const reminders = data.tasks.filter(task => !task.completed && !task.deletedAt).flatMap(task => task.reminders ?? (task.reminderEnabled && task.reminderAt ? [{ id: 'legacy', at: task.reminderAt, eventId: task.reminderEventId, sentAt: task.reminderSentAt }] : [])).filter(reminder => !reminder.sentAt)
+    const push = getWebPushConfig()
+    res.json({ schedulingAvailable: isReminderSchedulingAvailable(), webPush: { configured: push.configured, reason: push.reason }, tasks: data.tasks.length, subscriptions: data.subscriptions.length, pendingReminders: reminders.length, unregisteredReminders: reminders.filter(reminder => !reminder.eventId).length, legacyReminders: reminders.filter(reminder => reminder.eventId && !reminder.eventId.startsWith('cf:')).length, invalidEventIds: reminders.filter(reminder => reminder.eventId && !/^[a-zA-Z0-9:_-]{1,160}$/.test(reminder.eventId)).length })
+  } catch (error) { res.status(503).json({ error: '提醒预检未完成', diagnostics: reminderFailureDiagnostic(error) }) }
+})
+app.post('/api/reminders/bootstrap', reminderAdminAuth, async (_req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store')
   try { res.json(await bootstrapReminderSchedules()) }
-  catch { res.status(503).json({ error: '提醒迁移尚未完成，可安全重试' }) }
+  catch (error) { res.status(503).json({ error: '提醒迁移尚未完成，可安全重试', diagnostics: reminderFailureDiagnostic(error) }) }
 })
 app.get('/api/reminders/status', requireAuth, async (_req, res) => {
   res.setHeader('Cache-Control', 'private, no-store')

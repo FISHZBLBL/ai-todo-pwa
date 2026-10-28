@@ -101,8 +101,14 @@ async function jsonRequest(url, { secret, method = 'GET' } = {}) {
       ...(method === 'POST' ? { body: '{}' } : {}) })
   } catch { throw new Error('服务连接失败或发生重定向，请检查部署地址和网络') }
   if (!response.ok) {
+    if (url === bootstrapUrl && response.status === 503) {
+      let diagnostic
+      try { diagnostic = (await response.json()).diagnostics } catch { /* Paused sites can return HTML. */ }
+      const safe = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(value) ? value : undefined
+      const details = [safe(diagnostic?.code), safe(diagnostic?.operation), Number.isInteger(diagnostic?.upstreamStatus) ? `HTTP ${diagnostic.upstreamStatus}` : undefined, safe(diagnostic?.serviceCode)].filter(Boolean).join(' / ')
+      throw new Error(`提醒迁移未完成（503）${details ? `：${details}` : '；请检查生产部署和存储状态，503 不一定是额度暂停'}`)
+    }
     await response.body?.cancel()
-    if (url === bootstrapUrl && response.status === 503) throw new Error('Netlify 仍不可用（503）；请先恢复额度并发布新版后再执行 bootstrap')
     throw new Error(`服务检查失败（HTTP ${response.status}）；请检查部署和两端提醒密钥配置`)
   }
   try { return await response.json() } catch { throw new Error('服务没有返回预期的 JSON 响应') }
